@@ -234,10 +234,10 @@ fn authenticate(state: &WebDavState, headers: &HeaderMap, uri: &Uri) -> Option<c
         }
     }
 
-    // 2. URL query token（?token=xxx）
+    // 2. URL query token（?token=xxx）— 用于浏览器原生下载（<a> 标签无法带 header）
     if let Some(token) = query_token(uri) {
         if simple_mode {
-            // 简易模式: 只允许 PIN
+            // 简易模式: PIN 或管理员 session token
             if token == state.pin {
                 return Some(crate::db::User {
                     id: 0,
@@ -249,6 +249,8 @@ fn authenticate(state: &WebDavState, headers: &HeaderMap, uri: &Uri) -> Option<c
                     quota_mb: 0,
                 });
             }
+            // 管理员的 session token 也放行（下载用）
+            return state.db.verify_session(&token);
         } else {
             // 账号模式: 只允许 session token
             return state.db.verify_session(&token);

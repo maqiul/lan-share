@@ -1301,43 +1301,19 @@ async function loadDir(path){
   const wrap = document.getElementById('filewrap');
   wrap.innerHTML = '<div class="loading">正在加载</div>';
   try{
-    if(wsp.ready){
-      const resp = await wsp.listDir(path);
-      files = (resp.entries||[]).map(e=>({
-        name: e.name,
-        href: (path==='/'?'':path) + '/' + e.name,
-        isDir: e.is_dir,
-        size: e.size,
-        mtime: e.mtime,
-      }));
-    } else {
-      const res = await api('PROPFIND', path, { headers:{ 'Depth':'1' } });
-      const txt = await res.text();
-      files = parsePropfind(txt, path);
-    }
+    if(!wsp.ready) throw new Error('WSP 未连接，请刷新页面重试');
+    const resp = await wsp.listDir(path);
+    files = (resp.entries||[]).map(e=>({
+      name: e.name,
+      href: (path==='/'?'':path) + '/' + e.name,
+      isDir: e.is_dir,
+      size: e.size,
+      mtime: e.mtime,
+    }));
     render();
   }catch(e){
     if(e.message!=='unauthorized') wrap.innerHTML = '<div class="empty"><div class="big">⚠️</div><h3>加载失败</h3><p>'+e.message+'</p></div>';
   }
-}
-
-function parsePropfind(xml, base){
-  const doc = new DOMParser().parseFromString(xml, 'text/xml');
-  const out = [];
-  const baseNorm = base.replace(/\/$/,'') || '';
-  doc.querySelectorAll('response').forEach(r=>{
-    const href = r.querySelector('href')?.textContent || '';
-    const name = r.querySelector('displayname')?.textContent || '';
-    const isCol = !!r.querySelector('resourcetype collection');
-    const size = parseInt(r.querySelector('getcontentlength')?.textContent || '0');
-    const mtime = r.querySelector('getlastmodified')?.textContent || '';
-    // 跳过目录自身
-    const hrefNorm = href.replace(/\/$/,'');
-    if(hrefNorm === baseNorm || (base==='/' && href==='/')) return;
-    out.push({ name, href, isDir:isCol, size, mtime });
-  });
-  out.sort((a,b)=> (b.isDir-a.isDir) || a.name.localeCompare(b.name,'zh'));
-  return out;
 }
 
 /* 渲染 */
@@ -1674,15 +1650,10 @@ function showDiscoverResults(servers){
 async function del(href, name){
   if(!confirm('确定删除 "'+name+'" 吗？'+(files.find(f=>f.href===href)?.isDir?'\n（包含所有内容）':''))) return;
   try{
-    if(wsp.ready){
-      const r = await wsp.del(href);
-      if(r.ok){ toast('已删除 '+name); loadDir(curPath); }
-      else toast('删除失败：'+(r.error||'未知错误'),'err');
-    } else {
-      const res = await api('DELETE', href);
-      if(res.ok || res.status===204){ toast('已删除 '+name); loadDir(curPath); }
-      else toast('删除失败：HTTP '+res.status,'err');
-    }
+    if(!wsp.ready) throw new Error('WSP 未连接');
+    const r = await wsp.del(href);
+    if(r.ok){ toast('已删除 '+name); loadDir(curPath); }
+    else toast('删除失败：'+(r.error||'未知错误'),'err');
   }catch(e){ if(e.message!=='unauthorized') toast('删除失败：'+e.message,'err'); }
 }
 
@@ -1704,13 +1675,9 @@ async function batchDelete(){
   let ok = 0, fail = 0;
   for(const href of batchSet){
     try{
-      if(wsp.ready){
-        const r = await wsp.del(href);
-        if(r.ok) ok++; else fail++;
-      } else {
-        const res = await api('DELETE', href);
-        if(res.ok || res.status===204) ok++; else fail++;
-      }
+      if(!wsp.ready) throw new Error('WSP 未连接');
+      const r = await wsp.del(href);
+      if(r.ok) ok++; else fail++;
     }catch(e){ fail++; }
   }
   batchSet.clear();
@@ -1757,16 +1724,10 @@ function renamePrompt(href, name){
     if(/[\/\\]/.test(newName)){ toast('名称不能包含 / 或 \\','err'); return; }
     const dest = curPath.replace(/\/$/,'') + '/' + newName;
     try{
-      if(wsp.ready){
-        const r = await wsp.rename(href, dest);
-        if(r.ok){ toast('已重命名为 '+newName); loadDir(curPath); }
-        else toast('重命名失败：'+(r.error||'未知错误'),'err');
-      } else {
-        const destEnc = curPath.replace(/\/$/,'') + '/' + encodeURIComponent(newName);
-        const res = await api('MOVE', href, { headers:{ 'Destination': destEnc, 'Overwrite':'F' } });
-        if(res.ok || res.status===201 || res.status===204){ toast('已重命名为 '+newName); loadDir(curPath); }
-        else toast('重命名失败：HTTP '+res.status,'err');
-      }
+      if(!wsp.ready) throw new Error('WSP 未连接');
+      const r = await wsp.rename(href, dest);
+      if(r.ok){ toast('已重命名为 '+newName); loadDir(curPath); }
+      else toast('重命名失败：'+(r.error||'未知错误'),'err');
     }catch(e){ if(e.message!=='unauthorized') toast('重命名失败：'+e.message,'err'); }
   });
 }
@@ -1777,15 +1738,10 @@ function newFolder(){
     if(!name) return;
     const path = curPath.replace(/\/$/,'') + '/' + name;
     try{
-      if(wsp.ready){
-        const r = await wsp.mkdir(path);
-        if(r.ok){ toast('已创建 '+name); loadDir(curPath); }
-        else toast('创建失败：'+(r.error||'未知错误'),'err');
-      } else {
-        const res = await api('MKCOL', path);
-        if(res.ok || res.status===201){ toast('已创建 '+name); loadDir(curPath); }
-        else toast('创建失败：HTTP '+res.status,'err');
-      }
+      if(!wsp.ready) throw new Error('WSP 未连接');
+      const r = await wsp.mkdir(path);
+      if(r.ok){ toast('已创建 '+name); loadDir(curPath); }
+      else toast('创建失败：'+(r.error||'未知错误'),'err');
     }catch(e){ if(e.message!=='unauthorized') toast('创建失败：'+e.message,'err'); }
   });
 }
@@ -1798,26 +1754,12 @@ function uploadFiles(fileList){
     const qid = 'q'+Math.random().toString(36).slice(2);
     addQueue(qid, file.name);
 
-    if(wsp.ready){
-      try{
-        await wsp.upload(file, dest, pct=>updateQueue(qid, pct));
-        finishQueue(qid); toast('已上传 '+file.name); loadDir(curPath);
-      }catch(e){
-        failQueue(qid); toast('上传失败 '+file.name+'：'+e.message,'err');
-      }
-    } else {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', dest);
-      xhr.setRequestHeader('Authorization', authHeader());
-      xhr.upload.onprogress = e=>{
-        if(e.lengthComputable) updateQueue(qid, Math.round(e.loaded/e.total*100));
-      };
-      xhr.onload = ()=>{
-        if(xhr.status>=200 && xhr.status<300){ finishQueue(qid); toast('已上传 '+file.name); loadDir(curPath); }
-        else { failQueue(qid); toast('上传失败 '+file.name+' (HTTP '+xhr.status+')','err'); }
-      };
-      xhr.onerror = ()=>{ failQueue(qid); toast('上传失败 '+file.name,'err'); };
-      xhr.send(file);
+    if(!wsp.ready){ failQueue(qid); toast('WSP 未连接，无法上传','err'); return; }
+    try{
+      await wsp.upload(file, dest, pct=>updateQueue(qid, pct));
+      finishQueue(qid); toast('已上传 '+file.name); loadDir(curPath);
+    }catch(e){
+      failQueue(qid); toast('上传失败 '+file.name+'：'+e.message,'err');
     }
   });
 }
