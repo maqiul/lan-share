@@ -1064,6 +1064,39 @@ class WspClient {
   async trashDelete(name){ const f=await this._req(WSP.TRASH_DELETE,{name}); return this.json(f); }
   async trashEmpty(){ const f=await this._req(WSP.TRASH_EMPTY,{}); return this.json(f); }
 
+  download(path, fileName, onProgress){
+    return new Promise((resolve,reject)=>{
+      const sid=this.sid++;
+      const chunks=[];
+      let received=0, total=0;
+      this.handlers.set(sid,{
+        reject,
+        onData:(f)=>{
+          if(f.type===WSP.DOWNLOAD_DATA){
+            // payload: 8B offset + 1B is_last + data
+            const data = f.payload.slice(9);
+            chunks.push(data);
+            received += data.length;
+            if(onProgress && total>0) onProgress(Math.round(received/total*100));
+          } else if(f.type===WSP.DOWNLOAD_END){
+            const b=this.json(f);
+            total = b.size || received;
+            if(onProgress) onProgress(100);
+            const blob = new Blob(chunks);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = fileName || path.split('/').pop();
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(()=>URL.revokeObjectURL(url), 5000);
+            this.handlers.delete(sid);
+            resolve(b);
+          }
+        }
+      });
+      this.ws.send(this.encode(WSP.DOWNLOAD_REQ, sid, {path, offset:0}));
+    });
+  }
+
   upload(file, destPath, onProgress){
     return new Promise((resolve,reject)=>{
       const sid=this.sid++, CHUNK=256*1024;
@@ -1459,15 +1492,15 @@ function renderCrumbs(){
 /* 下载 */
 function download(href){
   const name = decodeURIComponent(href.split('/').pop());
-  // 浏览器原生流式下载：query token 携带认证，不走 fetch+blob，大文件不爆内存、支持断点续传
-  const sep = href.includes('?') ? '&' : '?';
-  const a = document.createElement('a');
-  a.href = href + sep + 'token=' + encodeURIComponent(TOKEN);
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  if(!wsp.ready){ toast('WSP 未连接，无法下载','err'); return; }
   toast('开始下载 ' + name);
+  wsp.download(href, name, pct=>{
+    // 可选：更新进度提示
+  }).then(()=>{
+    toast('下载完成 ' + name);
+  }).catch(e=>{
+    toast('下载失败 ' + name + '：' + e.message, 'err');
+  });
 }
 
 /* 文件夹打包下载 */
