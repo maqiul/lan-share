@@ -378,6 +378,7 @@ main{flex:1;display:flex;min-height:0}
           <button class="btn btn-ghost" style="justify-content:flex-start" onclick="newFolder()" data-i18n="newFolderBtn">📁 新建文件夹</button>
           <button class="btn btn-ghost" style="justify-content:flex-start" onclick="loadDir(curPath)" data-i18n="refresh">🔄 刷新</button>
           <button class="btn btn-ghost" style="justify-content:flex-start" onclick="discoverServers()" data-i18n="discover">🔍 发现局域网设备</button>
+          <button class="btn btn-ghost" style="justify-content:flex-start" onclick="openTrash()" data-i18n="trash">🗑 回收站</button>
         </div>
       </div>
     </aside>
@@ -538,6 +539,12 @@ main{flex:1;display:flex;min-height:0}
       </label>
       <button class="btn btn-pri" style="width:100%;justify-content:center;margin-top:8px" onclick="changePassword()" data-i18n="changePassword">修改密码</button>
     </div>
+    <!-- Admin: 审计日志 -->
+    <div class="setgroup admin-only" id="auditLogGroup" style="display:none">
+      <h5 data-i18n="auditLog">📋 操作日志</h5>
+      <div id="auditLogList" style="max-height:200px;overflow-y:auto;font-size:12px;color:var(--text-2)"></div>
+      <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;margin-top:8px" onclick="loadAuditLogs()" data-i18n="refresh">刷新</button>
+    </div>
   </div>
   <div class="drawer-foot">
     <div class="hint" style="margin:0 0 10px" data-i18n="saveHint">💾 保存系统设置后将 <b style="color:var(--cyan)">自动重启服务</b></div>
@@ -630,6 +637,24 @@ main{flex:1;display:flex;min-height:0}
     </div>
   </div>
 </div>
+
+<!-- 回收站 Modal -->
+<div class="um-modal-mask" id="trashMask" style="display:none">
+  <div class="um-modal" style="max-width:700px">
+    <div class="um-modal-head">
+      <h3 data-i18n="trashTitle">回收站</h3>
+      <button class="hbtn" onclick="closeTrash()">✕</button>
+    </div>
+    <div class="um-modal-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <span id="trashCount" style="color:var(--text-2)"></span>
+        <button class="btn btn-danger btn-sm" onclick="emptyTrash()" data-i18n="trashEmpty">清空回收站</button>
+      </div>
+      <div id="trashList" style="max-height:400px;overflow-y:auto"></div>
+    </div>
+  </div>
+</div>
+
 <script>
 const START_TIME = {{START_TS}};
 
@@ -753,6 +778,18 @@ const I18N = {
     pinCode: 'PIN 码',
     pinCodeDesc: '简易模式使用的密码（4-16位数字/字母）',
     pinTooShort: 'PIN 码至少 4 位',
+    trash: '🗑 回收站',
+    trashTitle: '回收站',
+    trashEmpty: '清空回收站',
+    trashRestore: '恢复',
+    trashDeleteForever: '永久删除',
+    trashEmptyConfirm: '确定清空回收站？此操作不可恢复。',
+    trashDeleted: '已永久删除',
+    trashRestored: '已恢复',
+    trashEmptied: '回收站已清空',
+    originalPath: '原路径',
+    auditLog: '📋 操作日志',
+    refresh: '刷新',
   },
   'en-US': {
     online: 'Online',
@@ -872,6 +909,18 @@ const I18N = {
     pinCode: 'PIN Code',
     pinCodeDesc: 'Password for simple mode (4-16 chars)',
     pinTooShort: 'PIN must be at least 4 characters',
+    trash: '🗑 Trash',
+    trashTitle: 'Trash',
+    trashEmpty: 'Empty Trash',
+    trashRestore: 'Restore',
+    trashDeleteForever: 'Delete Forever',
+    trashEmptyConfirm: 'Empty trash? This cannot be undone.',
+    trashDeleted: 'Permanently deleted',
+    trashRestored: 'Restored',
+    trashEmptied: 'Trash emptied',
+    originalPath: 'Original Path',
+    auditLog: '📋 Audit Log',
+    refresh: 'Refresh',
   }
 };
 
@@ -924,6 +973,7 @@ const WSP = {
   MKDIR:0x14, RENAME:0x15, DELETE:0x16, OP_ACK:0x17,
   UPLOAD_START:0x20, UPLOAD_DATA:0x21, UPLOAD_END:0x22, UPLOAD_ACK:0x23,
   DOWNLOAD_REQ:0x30, DOWNLOAD_DATA:0x31, DOWNLOAD_END:0x32,
+  TRASH_LIST:0x40, TRASH_LIST_RESP:0x41, TRASH_RESTORE:0x42, TRASH_DELETE:0x43, TRASH_EMPTY:0x44,
   ERROR:0xF0, KEEPALIVE:0xF1,
 };
 
@@ -987,6 +1037,10 @@ class WspClient {
   async mkdir(path){ const f=await this._req(WSP.MKDIR,{path}); return this.json(f); }
   async rename(oldPath,newPath){ const f=await this._req(WSP.RENAME,{old_path:oldPath,new_path:newPath}); return this.json(f); }
   async del(path){ const f=await this._req(WSP.DELETE,{path}); return this.json(f); }
+  async trashList(){ const f=await this._req(WSP.TRASH_LIST,{}); return this.json(f); }
+  async trashRestore(name){ const f=await this._req(WSP.TRASH_RESTORE,{name}); return this.json(f); }
+  async trashDelete(name){ const f=await this._req(WSP.TRASH_DELETE,{name}); return this.json(f); }
+  async trashEmpty(){ const f=await this._req(WSP.TRASH_EMPTY,{}); return this.json(f); }
 
   upload(file, destPath, onProgress){
     return new Promise((resolve,reject)=>{
@@ -1839,7 +1893,9 @@ function openSettings(){
   const isAdmin = USER && USER.role === 'admin';
   document.getElementById('adminSettingsGroup').style.display = isAdmin ? '' : 'none';
   document.getElementById('userMgmtGroup').style.display = isAdmin ? '' : 'none';
+  document.getElementById('auditLogGroup').style.display = isAdmin ? '' : 'none';
   loadSettings();
+  if(isAdmin) loadAuditLogs();
 }
 function closeSettings(){
   document.getElementById('drawerMask').classList.remove('on');
@@ -2032,6 +2088,90 @@ function showEditUser(id, username, role, sharedDir, quota, perms){
   document.getElementById('userEditMask').style.display = 'flex';
 }
 function closeUserEdit(){ document.getElementById('userEditMask').style.display = 'none'; }
+
+// 回收站
+async function openTrash(){
+  document.getElementById('trashMask').style.display = 'flex';
+  await loadTrash();
+}
+function closeTrash(){ document.getElementById('trashMask').style.display = 'none'; }
+async function loadTrash(){
+  const listEl = document.getElementById('trashList');
+  const countEl = document.getElementById('trashCount');
+  listEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-2)">加载中...</div>';
+  try {
+    const resp = await wsp.trashList();
+    const entries = resp.entries || [];
+    countEl.textContent = `${entries.length} 项`;
+    if(entries.length === 0){
+      listEl.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-2)">回收站为空</div>';
+      return;
+    }
+    listEl.innerHTML = entries.map(e => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px;border-bottom:1px solid var(--border)">
+        <span style="font-size:20px">${e.is_dir ? '📁' : '📄'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.name.replace(/_\d+$/, '')}</div>
+          <div style="font-size:12px;color:var(--text-2)">${t('originalPath')}: ${e.original_path || '-'}</div>
+        </div>
+        <button class="btn btn-sm" onclick="restoreTrash('${e.name}')">${t('trashRestore')}</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteTrash('${e.name}')">${t('trashDeleteForever')}</button>
+      </div>
+    `).join('');
+  } catch(e){
+    listEl.innerHTML = `<div style="text-align:center;padding:20px;color:var(--danger)">${e.message}</div>`;
+  }
+}
+async function restoreTrash(name){
+  try {
+    await wsp.trashRestore(name);
+    toast(t('trashRestored'));
+    await loadTrash();
+  } catch(e){ toast(e.message, 'error'); }
+}
+async function deleteTrash(name){
+  if(!confirm(t('trashDeleteForever') + '?')) return;
+  try {
+    await wsp.trashDelete(name);
+    toast(t('trashDeleted'));
+    await loadTrash();
+  } catch(e){ toast(e.message, 'error'); }
+}
+async function emptyTrash(){
+  if(!confirm(t('trashEmptyConfirm'))) return;
+  try {
+    const resp = await wsp.trashEmpty();
+    toast(t('trashEmptied') + ` (${resp.deleted || 0})`);
+    await loadTrash();
+  } catch(e){ toast(e.message, 'error'); }
+}
+
+// 审计日志
+async function loadAuditLogs(){
+  const el = document.getElementById('auditLogList');
+  el.innerHTML = '加载中...';
+  try {
+    const r = await api('GET', '/api/admin/audit-logs?limit=50');
+    const data = await r.json();
+    const logs = data.logs || [];
+    if(logs.length === 0){
+      el.innerHTML = '<div style="text-align:center;padding:10px">暂无日志</div>';
+      return;
+    }
+    el.innerHTML = logs.map(l => `
+      <div style="padding:4px 0;border-bottom:1px solid var(--border)">
+        <span style="color:var(--cyan)">[${l.action}]</span>
+        ${l.username ? `<b>${esc(l.username)}</b>` : ''}
+        ${l.path ? ` ${esc(l.path)}` : ''}
+        ${l.detail ? ` <span style="color:var(--text-2)">${esc(l.detail)}</span>` : ''}
+        <div style="font-size:11px;color:var(--mut)">${l.created_at}</div>
+      </div>
+    `).join('');
+  } catch(e){
+    el.innerHTML = `<div style="color:var(--danger)">${e.message}</div>`;
+  }
+}
+
 function getSelectedPerms(){
   const perms = [];
   if(document.getElementById('uePermRead').checked) perms.push('read');

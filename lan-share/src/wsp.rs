@@ -68,6 +68,13 @@ pub const MSG_DOWNLOAD_REQ: u8 = 0x30;
 pub const MSG_DOWNLOAD_DATA: u8 = 0x31;
 pub const MSG_DOWNLOAD_END: u8 = 0x32;
 
+// 回收站操作
+pub const MSG_TRASH_LIST: u8 = 0x40;
+pub const MSG_TRASH_LIST_RESP: u8 = 0x41;
+pub const MSG_TRASH_RESTORE: u8 = 0x42;
+pub const MSG_TRASH_DELETE: u8 = 0x43; // 永久删除
+pub const MSG_TRASH_EMPTY: u8 = 0x44; // 清空回收站
+
 pub const MSG_ERROR: u8 = 0xF0;
 pub const MSG_KEEPALIVE: u8 = 0xF1;
 
@@ -370,7 +377,6 @@ async fn wsp_connection(socket: WebSocket, state: Arc<WebDavState>) {
     c.uploads.clear();
 }
 
-/// 处理一帧，通过 frame_tx 发送响应（支持流式下载）
 /// 计算目录总大小（字节）
 async fn dir_size(path: &std::path::Path) -> u64 {
     let mut total = 0;
@@ -390,6 +396,102 @@ async fn dir_size(path: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+/// 获取回收站目录（在用户共享目录下）
+fn get_trash_dir(user_home: &std::path::Path) -> std::path::PathBuf {
+    user_home.join(".trash")
+}
+
+/// 移动文件到回收站
+async fn move_to_trash(user_home: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    let trash_dir = get_trash_dir(user_home);
+    tokio::fs::create_dir_all(&trash_dir).await.map_err(|e| e.to_string())?;
+
+    // 生成唯一文件名：原名_时间戳
+    let file_name = target.file_name().unwrap_or_default().to_string_lossy();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let trash_name = format!("{}_{}", file_name, timestamp);
+    let trash_path = trash_dir.join(&trash_name);
+
+    // 保存原始路径信息（用于恢复）
+    let relative_path = target.strip_prefix(user_home).unwrap_or(target);
+    let meta_path = trash_dir.join(format!("{}.meta", trash_name));
+    tokio::fs::write(&meta_path, relative_path.to_string_lossy().as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 移动文件
+    tokio::fs::rename(target, &trash_path).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 从回收站恢复文件
+async fn restore_from_trash(user_home: &std::path::Path, trash_name: &str) -> Result<(), String> {
+    let trash_dir = get_trash_dir(user_home);
+    let trash_path = trash_dir.join(trash_name);
+    let meta_path = trash_dir.join(format!("{}.meta", trash_name));
+
+    // 读取原始路径
+    let original_relative = tokio::fs::read_to_string(&meta_path)
+        .await
+        .map_err(|e| format!("读取元数据失败: {}", e))?;
+    let original_path = user_home.join(&original_relative);
+
+    // 确保父目录存在
+    if let Some(parent) = original_path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+    }
+
+    // 移动回去
+    tokio::fs::rename(&trash_path, &original_path).await.map_err(|e| e.to_string())?;
+    // 删除元数据
+    let _ = tokio::fs::remove_file(&meta_path).await;
+    Ok(())
+}
+
+/// 永久删除回收站中的文件
+async fn permanent_delete_from_trash(user_home: &std::path::Path, trash_name: &str) -> Result<(), String> {
+    let trash_dir = get_trash_dir(user_home);
+    let trash_path = trash_dir.join(trash_name);
+    let meta_path = trash_dir.join(format!("{}.meta", trash_name));
+
+    if trash_path.is_dir() {
+        tokio::fs::remove_dir_all(&trash_path).await.map_err(|e| e.to_string())?;
+    } else {
+        tokio::fs::remove_file(&trash_path).await.map_err(|e| e.to_string())?;
+    }
+    let _ = tokio::fs::remove_file(&meta_path).await;
+    Ok(())
+}
+
+/// 清空回收站
+async fn empty_trash(user_home: &std::path::Path) -> Result<u64, String> {
+    let trash_dir = get_trash_dir(user_home);
+    if !trash_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut count = 0;
+    let mut entries = tokio::fs::read_dir(&trash_dir).await.map_err(|e| e.to_string())?;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        // 跳过 .meta 文件
+        if path.extension().map(|e| e == "meta").unwrap_or(false) {
+            let _ = tokio::fs::remove_file(&path).await;
+            continue;
+        }
+        if path.is_dir() {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+        } else {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        count += 1;
+    }
+    Ok(count)
 }
 
 async fn handle_frame(
@@ -514,7 +616,10 @@ async fn handle_frame(
             let result = tokio::fs::create_dir_all(&dir).await;
             let mut c = conn.lock().await;
             match result {
-                Ok(()) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await; }
+                Ok(()) => {
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "mkdir", Some(&msg.path), None, None);
+                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                }
                 Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode()).await; }
             }
         }
@@ -547,12 +652,15 @@ async fn handle_frame(
             let result = tokio::fs::rename(&old, &new).await;
             let mut c = conn.lock().await;
             match result {
-                Ok(()) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await; }
+                Ok(()) => {
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "rename", Some(&msg.old_path), Some(&format!("→ {}", msg.new_path)), None);
+                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                }
                 Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode()).await; }
             }
         }
 
-        // 删除
+        // 删除（移到回收站）
         MSG_DELETE => {
             let msg: DeleteMsg = match frame.json_body() {
                 Ok(m) => m,
@@ -572,15 +680,15 @@ async fn handle_frame(
                 let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
                 return;
             };
-            let result = if target.is_dir() {
-                tokio::fs::remove_dir_all(&target).await
-            } else {
-                tokio::fs::remove_file(&target).await
-            };
+            // 移到回收站
+            let result = move_to_trash(&home, &target).await;
             let mut c = conn.lock().await;
             match result {
-                Ok(()) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await; }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode()).await; }
+                Ok(()) => {
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "delete", Some(&msg.path), Some("移到回收站"), None);
+                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                }
+                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
             }
         }
 
@@ -740,6 +848,7 @@ async fn handle_frame(
                 } else {
                     tracing::info!("[WSP] 上传完成: {:?} ({} bytes)", up.path, up.received);
                     let mut c = conn.lock().await;
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "upload", Some(&up.path.to_string_lossy()), Some(&format!("{} bytes", up.received)), None);
                     let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
                 }
             } else {
@@ -803,6 +912,7 @@ async fn handle_frame(
                     let mut c = conn.lock().await;
                     // 同步 seq 计数器
                     c.seq = local_seq;
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "download", Some(&msg.path), Some(&format!("{} bytes", total)), None);
                     let _ = frame_tx.send(WspFrame::json(MSG_DOWNLOAD_END, sid, c.next_seq(), &DownloadEndMsg {
                         path: msg.path, size: total,
                     }).encode()).await;
@@ -811,6 +921,92 @@ async fn handle_frame(
                     let mut c = conn.lock().await;
                     let _ = frame_tx.send(error_frame(sid, c.next_seq(), 404, &e.to_string()).encode()).await;
                 }
+            }
+        }
+
+        // 回收站：列出
+        MSG_TRASH_LIST => {
+            let home = user_home.unwrap();
+            let trash_dir = get_trash_dir(&home);
+            let mut entries = Vec::new();
+            if trash_dir.exists() {
+                if let Ok(mut rd) = tokio::fs::read_dir(&trash_dir).await {
+                    while let Ok(Some(entry)) = rd.next_entry().await {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        // 跳过 .meta 文件
+                        if name.ends_with(".meta") { continue; }
+                        let meta_path = trash_dir.join(format!("{}.meta", name));
+                        let original_path = tokio::fs::read_to_string(&meta_path).await.unwrap_or_default();
+                        let is_dir = entry.path().is_dir();
+                        let size = if is_dir {
+                            dir_size(&entry.path()).await
+                        } else {
+                            entry.metadata().await.map(|m| m.len()).unwrap_or(0)
+                        };
+                        entries.push(serde_json::json!({
+                            "name": name,
+                            "original_path": original_path,
+                            "is_dir": is_dir,
+                            "size": size,
+                        }));
+                    }
+                }
+            }
+            let mut c = conn.lock().await;
+            let resp = serde_json::json!({ "entries": entries });
+            let _ = frame_tx.send(WspFrame::json(MSG_TRASH_LIST_RESP, sid, c.next_seq(), &resp).encode()).await;
+        }
+
+        // 回收站：恢复
+        MSG_TRASH_RESTORE => {
+            let msg: serde_json::Value = match frame.json_body() {
+                Ok(m) => m,
+                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+            };
+            let trash_name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let home = user_home.unwrap();
+            let result = restore_from_trash(&home, trash_name).await;
+            let mut c = conn.lock().await;
+            match result {
+                Ok(()) => {
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "trash_restore", Some(trash_name), None, None);
+                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                }
+                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
+            }
+        }
+
+        // 回收站：永久删除
+        MSG_TRASH_DELETE => {
+            let msg: serde_json::Value = match frame.json_body() {
+                Ok(m) => m,
+                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+            };
+            let trash_name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let home = user_home.unwrap();
+            let result = permanent_delete_from_trash(&home, trash_name).await;
+            let mut c = conn.lock().await;
+            match result {
+                Ok(()) => {
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "trash_delete", Some(trash_name), Some("永久删除"), None);
+                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                }
+                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
+            }
+        }
+
+        // 回收站：清空
+        MSG_TRASH_EMPTY => {
+            let home = user_home.unwrap();
+            let result = empty_trash(&home).await;
+            let mut c = conn.lock().await;
+            match result {
+                Ok(count) => {
+                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "trash_empty", None, Some(&format!("删除 {} 项", count)), None);
+                    let resp = serde_json::json!({ "ok": true, "deleted": count });
+                    let _ = frame_tx.send(WspFrame::json(MSG_OP_ACK, sid, c.next_seq(), &resp).encode()).await;
+                }
+                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
             }
         }
 
@@ -858,6 +1054,10 @@ fn resolve_user_dir(state: &WebDavState, user: &crate::db::User) -> PathBuf {
 /// 返回 None 表示路径非法（含 .. 或逃逸出 home）
 fn safe_join(home: &Path, rel: &str) -> Option<PathBuf> {
     let rel = rel.trim_start_matches('/').trim_start_matches('\\');
+    // 空路径 = 根目录
+    if rel.is_empty() {
+        return home.canonicalize().ok();
+    }
     // 拒绝含 .. 的路径组件（防穿越）
     if rel.split(['/', '\\']).any(|c| c == "..") {
         return None;
@@ -865,13 +1065,17 @@ fn safe_join(home: &Path, rel: &str) -> Option<PathBuf> {
     let joined = home.join(rel);
     // 文件已存在：canonicalize 后验证前缀
     if let Ok(p) = joined.canonicalize() {
-        if p.starts_with(home) { return Some(p); }
+        if let Ok(h) = home.canonicalize() {
+            if p.starts_with(&h) { return Some(p); }
+        }
         return None;
     }
     // 文件不存在（上传/建目录）：验证父目录在 home 内
     if let Some(parent) = joined.parent() {
         if let Ok(cp) = parent.canonicalize() {
-            if cp.starts_with(home) { return Some(joined); }
+            if let Ok(h) = home.canonicalize() {
+                if cp.starts_with(&h) { return Some(joined); }
+            }
         }
     }
     // 兜底：只允许简单文件名（不含任何路径分隔符）
@@ -886,11 +1090,14 @@ async fn list_dir_entries(dir: &Path) -> Result<Vec<DirEntryMsg>, String> {
     let mut rd = tokio::fs::read_dir(dir).await
         .map_err(|e| format!("无法读取目录: {}", e))?;
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 隐藏系统目录
+        if name == ".trash" { continue; }
         let meta = entry.metadata().await.map_err(|e| e.to_string())?;
         let mtime = chrono::DateTime::<chrono::Local>::from(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH))
             .format("%Y-%m-%d %H:%M:%S").to_string();
         entries.push(DirEntryMsg {
-            name: entry.file_name().to_string_lossy().to_string(),
+            name,
             is_dir: meta.is_dir(),
             size: meta.len(),
             mtime,

@@ -13,43 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Instant;
-
-/// 登录限流：用户名 → (连续失败次数, 上次失败时间)
-static LOGIN_LIMITS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-const MAX_LOGIN_ATTEMPTS: u32 = 5;
-const LOCKOUT_SECS: u64 = 300; // 5 分钟
-
-/// 检查是否被锁定，返回剩余锁定秒数（0=未锁定）
-fn check_login_lockout(username: &str) -> u64 {
-    let mut map = LOGIN_LIMITS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((count, last)) = map.get(username) {
-        if *count >= MAX_LOGIN_ATTEMPTS {
-            let elapsed = last.elapsed().as_secs();
-            if elapsed < LOCKOUT_SECS {
-                return LOCKOUT_SECS - elapsed;
-            }
-            // 锁定已过期，清除
-            map.remove(username);
-        }
-    }
-    0
-}
-
-/// 记录登录失败
-fn record_login_fail(username: &str) {
-    let mut map = LOGIN_LIMITS.lock().unwrap_or_else(|e| e.into_inner());
-    let entry = map.entry(username.to_string()).or_insert((0, Instant::now()));
-    entry.0 += 1;
-    entry.1 = Instant::now();
-}
-
-/// 登录成功后清除记录
-fn clear_login_fail(username: &str) {
-    let mut map = LOGIN_LIMITS.lock().unwrap_or_else(|e| e.into_inner());
-    map.remove(username);
-}
+use std::sync::Arc;
 
 // 请求/响应结构
 
@@ -196,16 +160,17 @@ fn validate_password(pwd: &str) -> Result<(), String> {
 
 /// POST /api/login
 pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginReq>) -> Response {
-    // 暴力破解防护：检查是否被锁定
-    let lockout = check_login_lockout(&req.username);
-    if lockout > 0 {
+    // 暴力破解防护：检查是否被锁定（数据库持久化）
+    let (locked, remain_secs) = state.db.is_account_locked(&req.username);
+    if locked {
         return json_resp(StatusCode::TOO_MANY_REQUESTS,
-            &format!(r#"{{"error":"登录失败次数过多，请 {} 秒后重试"}}"#, lockout));
+            &format!(r#"{{"error":"登录失败次数过多，请 {} 秒后重试"}}"#, remain_secs));
     }
 
     match state.db.verify_login(&req.username, &req.password) {
         Some(user) => {
-            clear_login_fail(&req.username);
+            state.db.clear_failed_attempts(&req.username);
+            state.db.record_login_attempt(&req.username, None, true);
             let token = match state.db.create_session(user.id) {
                 Ok(t) => t,
                 Err(e) => return json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
@@ -220,7 +185,7 @@ pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginR
             ok_json(&resp)
         }
         None => {
-            record_login_fail(&req.username);
+            state.db.record_login_attempt(&req.username, None, false);
             // 审计日志：登录失败
             state.db.audit_log(None, &req.username, "login_failed", None, Some("用户名或密码错误"), None);
             unauthorized_json("用户名或密码错误")
@@ -253,7 +218,10 @@ pub async fn change_password(
         return bad_request_json(&msg);
     }
     match state.db.change_password(user.id, &req.new_password) {
-        Ok(()) => json_resp(StatusCode::OK, r#"{"ok":true}"#),
+        Ok(()) => {
+            state.db.audit_log(Some(user.id), &user.username, "change_password", None, Some("修改自己的密码"), None);
+            json_resp(StatusCode::OK, r#"{"ok":true}"#)
+        }
         Err(e) => json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
     }
 }
@@ -300,7 +268,10 @@ pub async fn create_user(
     };
 
     match state.db.create_user(&req.username, &req.password, &req.role, shared_dir.as_deref(), &req.permissions, req.quota_mb) {
-        Ok(id) => json_resp(StatusCode::CREATED, &format!(r#"{{"ok":true,"id":{id}}}"#)),
+        Ok(id) => {
+            state.db.audit_log(Some(user.id), &user.username, "create_user", None, Some(&format!("用户: {}", req.username)), None);
+            json_resp(StatusCode::CREATED, &format!(r#"{{"ok":true,"id":{id}}}"#))
+        }
         Err(e) => bad_request_json(&e),
     }
 }
@@ -314,7 +285,10 @@ pub async fn delete_user(
     let user = require_auth!(&state, &headers);
     require_admin!(user);
     match state.db.delete_user(user_id) {
-        Ok(()) => json_resp(StatusCode::OK, r#"{"ok":true}"#),
+        Ok(()) => {
+            state.db.audit_log(Some(user.id), &user.username, "delete_user", None, Some(&format!("用户ID: {}", user_id)), None);
+            json_resp(StatusCode::OK, r#"{"ok":true}"#)
+        }
         Err(e) => bad_request_json(&e),
     }
 }
@@ -329,7 +303,10 @@ pub async fn update_user(
     let user = require_auth!(&state, &headers);
     require_admin!(user);
     match state.db.update_user(user_id, req.role.as_deref(), req.shared_dir.as_ref().map(|d| d.as_deref()), req.permissions.as_deref(), req.quota_mb) {
-        Ok(()) => json_resp(StatusCode::OK, r#"{"ok":true}"#),
+        Ok(()) => {
+            state.db.audit_log(Some(user.id), &user.username, "update_user", None, Some(&format!("用户ID: {}", user_id)), None);
+            json_resp(StatusCode::OK, r#"{"ok":true}"#)
+        }
         Err(e) => bad_request_json(&e),
     }
 }
@@ -347,7 +324,10 @@ pub async fn reset_user_password(
         return bad_request_json(&msg);
     }
     match state.db.change_password(user_id, &req.new_password) {
-        Ok(()) => json_resp(StatusCode::OK, r#"{"ok":true}"#),
+        Ok(()) => {
+            state.db.audit_log(Some(user.id), &user.username, "reset_password", None, Some(&format!("用户ID: {}", user_id)), None);
+            json_resp(StatusCode::OK, r#"{"ok":true}"#)
+        }
         Err(e) => json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
     }
 }
@@ -410,6 +390,7 @@ pub async fn set_admin_settings(
         }
     }
 
+    state.db.audit_log(Some(user.id), &user.username, "update_settings", None, Some("修改系统设置"), None);
     json_resp(StatusCode::OK, r#"{"ok":true}"#)
 }
 
@@ -657,6 +638,8 @@ pub async fn create_share(
     let token = state.db.create_share(user.id, &req.path, req.expires_hours, req.max_downloads);
     let url = format!("/s/{}", token);
 
+    state.db.audit_log(Some(user.id), &user.username, "create_share", Some(&req.path), Some(&format!("token: {}", token)), None);
+
     json_resp(StatusCode::OK, &format!(
         r#"{{"ok":true,"token":"{}","url":"{}"}}"#,
         token, url
@@ -729,6 +712,9 @@ pub async fn access_share(
 
     // 增加下载次数
     state.db.increment_share_download(&token);
+
+    // 审计日志：分享链接访问
+    state.db.audit_log(Some(user_id), &user.username, "share_access", Some(&path), Some(&format!("token: {}", token)), None);
 
     // 如果是目录，打包 zip 下载
     if full_path.is_dir() {

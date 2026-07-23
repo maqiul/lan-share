@@ -96,6 +96,15 @@ impl Database {
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                ip_addr TEXT,
+                success INTEGER NOT NULL DEFAULT 0,
+                attempted_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_login_attempts_user ON login_attempts(username, attempted_at);
+
             CREATE TABLE IF NOT EXISTS shares (
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -248,6 +257,73 @@ impl Database {
     pub fn logout(&self, token: &str) {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute("DELETE FROM sessions WHERE token = ?1", params![token]);
+    }
+
+    // 登录限流
+
+    /// 记录登录尝试
+    pub fn record_login_attempt(&self, username: &str, ip_addr: Option<&str>, success: bool) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute(
+            "INSERT INTO login_attempts (username, ip_addr, success) VALUES (?1, ?2, ?3)",
+            params![username, ip_addr, success as i64],
+        );
+        // 清理 30 天前的记录
+        let _ = conn.execute(
+            "DELETE FROM login_attempts WHERE attempted_at < datetime('now', '-30 days')",
+            [],
+        );
+    }
+
+    /// 检查账户是否被锁定（15分钟内失败5次）
+    /// 返回 (是否锁定, 剩余解锁秒数)
+    pub fn is_account_locked(&self, username: &str) -> (bool, i64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // 查询最近 15 分钟内的失败次数
+        let fail_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM login_attempts
+                 WHERE username = ?1 AND success = 0
+                 AND attempted_at > datetime('now', '-15 minutes')",
+                params![username],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        if fail_count >= 5 {
+            // 查询最后一次失败时间，计算剩余锁定时间
+            let last_fail: String = conn
+                .query_row(
+                    "SELECT attempted_at FROM login_attempts
+                     WHERE username = ?1 AND success = 0
+                     ORDER BY attempted_at DESC LIMIT 1",
+                    params![username],
+                    |r| r.get(0),
+                )
+                .unwrap_or_default();
+
+            // 计算剩余秒数（15分钟 - 已过时间）
+            let remain: i64 = conn
+                .query_row(
+                    "SELECT CAST((julianday(datetime('now', '+15 minutes')) - julianday(?1)) * 86400 AS INTEGER)",
+                    params![last_fail],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+
+            (true, remain.max(0))
+        } else {
+            (false, 0)
+        }
+    }
+
+    /// 登录成功后清除该用户的失败记录
+    pub fn clear_failed_attempts(&self, username: &str) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = conn.execute(
+            "DELETE FROM login_attempts WHERE username = ?1 AND success = 0",
+            params![username],
+        );
     }
 
     // 用户管理（admin）
