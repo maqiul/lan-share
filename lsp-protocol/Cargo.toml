@@ -1,0 +1,28 @@
+[package]
+name = "lsp-protocol"
+version = "0.3.0"
+edition = "2021"
+description = "LanShare Protocol v3.0 - 局域网文件传输二进制协议（加密/重传/流控/拥塞控制/差异传输/压缩）"
+license = "MIT"
+keywords = ["protocol", "lan", "file-transfer", "binary", "multiplex"]
+categories = ["network-programming"]
+
+[dependencies]
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["net", "io-util", "fs", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+thiserror = "1"
+tracing = "0.1"
+lz4_flex = "0.11"
+zstd = "0.13"
+socket2 = "0.5"

@@ -1,0 +1,3 @@
+[workspace]
+members = ["lsp-protocol", "lan-share"]
+resolver = "2"
