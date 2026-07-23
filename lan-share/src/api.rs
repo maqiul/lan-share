@@ -171,13 +171,10 @@ pub async fn get_mode(State(state): State<Arc<WebDavState>>) -> Response {
 
 /// POST /api/login
 pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginReq>) -> Response {
-    // 简易模式下禁用账号登录
+    // 简易模式下只允许管理员登录（用于进入设置界面）
     let simple_mode = state.db.get_admin_setting("simple_mode")
         .map(|v| v != "false")
         .unwrap_or(true);
-    if simple_mode {
-        return json_resp(StatusCode::FORBIDDEN, r#"{"error":"简易模式下请使用 PIN 码连接"}"#);
-    }
 
     // 暴力破解防护：检查是否被锁定（数据库持久化）
     let (locked, remain_secs) = state.db.is_account_locked(&req.username);
@@ -188,6 +185,10 @@ pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginR
 
     match state.db.verify_login(&req.username, &req.password) {
         Some(user) => {
+            // 简易模式下只允许管理员登录
+            if simple_mode && user.role != "admin" {
+                return json_resp(StatusCode::FORBIDDEN, r#"{"error":"简易模式下请使用 PIN 码连接"}"#);
+            }
             state.db.clear_failed_attempts(&req.username);
             state.db.record_login_attempt(&req.username, None, true);
             let token = match state.db.create_session(user.id) {

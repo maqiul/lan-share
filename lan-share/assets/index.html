@@ -406,6 +406,17 @@ main{flex:1;display:flex;min-height:0}
     <!-- 简易模式 -->
     <div id="pinLogin" style="display:none">
       <input id="pinInput" type="password" data-i18n-placeholder="pinCode" placeholder="PIN 码" autocomplete="off" maxlength="16" autofocus>
+      <div style="margin-top:12px;text-align:center">
+        <a href="javascript:void(0)" onclick="showAdminLogin()" style="color:var(--cyan);font-size:13px" data-i18n="adminLogin">管理员登录</a>
+      </div>
+    </div>
+    <!-- 简易模式下的管理员登录 -->
+    <div id="adminLoginInSimple" style="display:none">
+      <input id="adminUsernameInput" type="text" data-i18n-placeholder="username" placeholder="管理员账号" autocomplete="username">
+      <input id="adminPasswordInput" type="password" data-i18n-placeholder="password" placeholder="密码" autocomplete="current-password" style="margin-top:10px">
+      <div style="margin-top:12px;text-align:center">
+        <a href="javascript:void(0)" onclick="showPinLogin()" style="color:var(--cyan);font-size:13px" data-i18n="backToPin">返回 PIN 登录</a>
+      </div>
     </div>
     <button class="btn btn-pri" id="btnLogin" data-i18n="login">登录</button>
     <div class="err" id="loginErr"></div>
@@ -797,6 +808,8 @@ const I18N = {
     originalPath: '原路径',
     auditLog: '📋 操作日志',
     refresh: '刷新',
+    adminLogin: '管理员登录',
+    backToPin: '返回 PIN 登录',
   },
   'en-US': {
     online: 'Online',
@@ -928,6 +941,8 @@ const I18N = {
     originalPath: 'Original Path',
     auditLog: '📋 Audit Log',
     refresh: 'Refresh',
+    adminLogin: 'Admin Login',
+    backToPin: 'Back to PIN',
   }
 };
 
@@ -1152,6 +1167,7 @@ function showLogin(msg){
 }
 
 let SIMPLE_MODE = true;
+let ADMIN_LOGIN_MODE = false; // 简易模式下是否切换到管理员登录
 
 // 页面加载时获取模式
 async function initLoginMode(){
@@ -1161,6 +1177,7 @@ async function initLoginMode(){
     SIMPLE_MODE = data.simple_mode;
     document.getElementById('accountLogin').style.display = SIMPLE_MODE ? 'none' : '';
     document.getElementById('pinLogin').style.display = SIMPLE_MODE ? '' : 'none';
+    document.getElementById('adminLoginInSimple').style.display = 'none';
     if(SIMPLE_MODE) {
       document.getElementById('pinInput').focus();
     } else {
@@ -1172,8 +1189,24 @@ async function initLoginMode(){
 }
 initLoginMode();
 
+// 简易模式下切换到管理员登录
+function showAdminLogin(){
+  ADMIN_LOGIN_MODE = true;
+  document.getElementById('pinLogin').style.display = 'none';
+  document.getElementById('adminLoginInSimple').style.display = '';
+  document.getElementById('adminUsernameInput').focus();
+}
+
+// 返回 PIN 登录
+function showPinLogin(){
+  ADMIN_LOGIN_MODE = false;
+  document.getElementById('pinLogin').style.display = '';
+  document.getElementById('adminLoginInSimple').style.display = 'none';
+  document.getElementById('pinInput').focus();
+}
+
 async function tryLogin(){
-  if(SIMPLE_MODE) {
+  if(SIMPLE_MODE && !ADMIN_LOGIN_MODE) {
     // 简易模式：PIN 登录
     const pin = document.getElementById('pinInput').value;
     if(!pin){ showLogin('请输入 PIN 码'); return; }
@@ -1188,9 +1221,15 @@ async function tryLogin(){
       loadDir('/');
     } catch(e) { showLogin('连接失败：'+e.message); }
   } else {
-    // 账号模式
-    const username = $username.value.trim();
-    const password = $password.value;
+    // 账号模式 或 简易模式下的管理员登录
+    let username, password;
+    if(SIMPLE_MODE && ADMIN_LOGIN_MODE) {
+      username = document.getElementById('adminUsernameInput').value.trim();
+      password = document.getElementById('adminPasswordInput').value;
+    } else {
+      username = $username.value.trim();
+      password = $password.value;
+    }
     if(!username || !password){ showLogin('请输入用户名和密码'); return; }
     try{
       const res = await fetch('/api/login', {
@@ -1221,6 +1260,8 @@ document.getElementById('btnLogin').onclick = tryLogin;
 $password.onkeydown = e => { if(e.key==='Enter') tryLogin(); };
 $username.onkeydown = e => { if(e.key==='Enter') $password.focus(); };
 document.getElementById('pinInput').onkeydown = e => { if(e.key==='Enter') tryLogin(); };
+document.getElementById('adminUsernameInput').onkeydown = e => { if(e.key==='Enter') document.getElementById('adminPasswordInput').focus(); };
+document.getElementById('adminPasswordInput').onkeydown = e => { if(e.key==='Enter') tryLogin(); };
 
 /* 强制改密 */
 const $changePwd = document.getElementById('changePwd');
