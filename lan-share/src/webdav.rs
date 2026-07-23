@@ -184,12 +184,25 @@ fn authenticate(state: &WebDavState, headers: &HeaderMap, uri: &Uri) -> Option<c
 
     // 1. Authorization header
     if let Some(auth) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        // Bearer token（仅账号模式）
+        // Bearer token
         if let Some(token) = auth.strip_prefix("Bearer ") {
-            if !simple_mode {
+            if simple_mode {
+                // 简易模式：Bearer token = PIN 也放行
+                if token == state.pin {
+                    return Some(crate::db::User {
+                        id: 0,
+                        username: "share".to_string(),
+                        role: "user".to_string(),
+                        shared_dir: None,
+                        must_change_password: false,
+                        permissions: "read,write,delete,rename,share,mkdir".to_string(),
+                        quota_mb: 0,
+                    });
+                }
+                // 简易模式下管理员的 session token 也放行
                 return state.db.verify_session(token);
             }
-            return None;
+            return state.db.verify_session(token);
         }
         // Basic auth
         if let Some(b64) = auth.strip_prefix("Basic ") {
