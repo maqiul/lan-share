@@ -398,8 +398,15 @@ main{flex:1;display:flex;min-height:0}
     <div class="fico">🔐</div>
     <h2 data-i18n="loginTitle">连接到 LanShare</h2>
     <p><span data-i18n="loginHint">登录以访问</span> <b style="color:var(--txt)">{{DEVICE_NAME}}</b> <span data-i18n="sharedFiles">的共享文件</span></p>
-    <input id="usernameInput" type="text" data-i18n-placeholder="username" placeholder="用户名" autocomplete="username" autofocus>
-    <input id="passwordInput" type="password" data-i18n-placeholder="password" placeholder="密码" autocomplete="current-password" style="margin-top:10px">
+    <!-- 账号模式 -->
+    <div id="accountLogin">
+      <input id="usernameInput" type="text" data-i18n-placeholder="username" placeholder="用户名" autocomplete="username" autofocus>
+      <input id="passwordInput" type="password" data-i18n-placeholder="password" placeholder="密码" autocomplete="current-password" style="margin-top:10px">
+    </div>
+    <!-- 简易模式 -->
+    <div id="pinLogin" style="display:none">
+      <input id="pinInput" type="password" data-i18n-placeholder="pinCode" placeholder="PIN 码" autocomplete="off" maxlength="16" autofocus>
+    </div>
     <button class="btn btn-pri" id="btnLogin" data-i18n="login">登录</button>
     <div class="err" id="loginErr"></div>
   </div>
@@ -1138,39 +1145,82 @@ const $password = document.getElementById('passwordInput');
 function showLogin(msg){
   $login.classList.remove('off');
   document.getElementById('loginErr').textContent = msg || '';
-  setTimeout(()=>$username.focus(), 50);
+  setTimeout(()=>{
+    if(SIMPLE_MODE) document.getElementById('pinInput').focus();
+    else $username.focus();
+  }, 50);
 }
-async function tryLogin(){
-  const username = $username.value.trim();
-  const password = $password.value;
-  if(!username || !password){ showLogin('请输入用户名和密码'); return; }
-  try{
-    const res = await fetch('/api/login', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({username, password}),
-    });
+
+let SIMPLE_MODE = true;
+
+// 页面加载时获取模式
+async function initLoginMode(){
+  try {
+    const res = await fetch('/api/mode');
     const data = await res.json();
-    if(res.ok && data.token){
-      TOKEN = data.token;
-      USER = data.user;
+    SIMPLE_MODE = data.simple_mode;
+    document.getElementById('accountLogin').style.display = SIMPLE_MODE ? 'none' : '';
+    document.getElementById('pinLogin').style.display = SIMPLE_MODE ? '' : 'none';
+    if(SIMPLE_MODE) {
+      document.getElementById('pinInput').focus();
+    } else {
+      $username.focus();
+    }
+  } catch(e) {
+    console.error('获取模式失败:', e);
+  }
+}
+initLoginMode();
+
+async function tryLogin(){
+  if(SIMPLE_MODE) {
+    // 简易模式：PIN 登录
+    const pin = document.getElementById('pinInput').value;
+    if(!pin){ showLogin('请输入 PIN 码'); return; }
+    try {
+      // 直接用 PIN 连接 WSP
+      TOKEN = pin;
+      USER = { id: 0, username: 'share', role: 'user', permissions: 'read,write,delete,rename,share,mkdir', quota_mb: 0 };
       sessionStorage.setItem('lsp_token', TOKEN);
       sessionStorage.setItem('lsp_user', JSON.stringify(USER));
       $login.classList.add('off');
-      if(data.must_change_password){
-        showChangePassword();
+      await connectWsp();
+      loadDir('/');
+    } catch(e) { showLogin('连接失败：'+e.message); }
+  } else {
+    // 账号模式
+    const username = $username.value.trim();
+    const password = $password.value;
+    if(!username || !password){ showLogin('请输入用户名和密码'); return; }
+    try{
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username, password}),
+      });
+      const data = await res.json();
+      if(res.ok && data.token){
+        TOKEN = data.token;
+        USER = data.user;
+        sessionStorage.setItem('lsp_token', TOKEN);
+        sessionStorage.setItem('lsp_user', JSON.stringify(USER));
+        $login.classList.add('off');
+        if(data.must_change_password){
+          showChangePassword();
+        } else {
+          await connectWsp();
+          loadDir('/');
+        }
       } else {
-        await connectWsp();
-        loadDir('/');
+        showLogin(data.error || '登录失败');
       }
-    } else {
-      showLogin(data.error || '登录失败');
-    }
-  }catch(e){ showLogin('连接失败：'+e.message); }
+    }catch(e){ showLogin('连接失败：'+e.message); }
+  }
 }
 document.getElementById('btnLogin').onclick = tryLogin;
 $password.onkeydown = e => { if(e.key==='Enter') tryLogin(); };
 $username.onkeydown = e => { if(e.key==='Enter') $password.focus(); };
+document.getElementById('pinInput').onkeydown = e => { if(e.key==='Enter') tryLogin(); };
 
 /* 强制改密 */
 const $changePwd = document.getElementById('changePwd');
@@ -1891,11 +1941,13 @@ function openSettings(){
   document.getElementById('drawerMask').classList.add('on');
   document.getElementById('drawer').classList.add('on');
   const isAdmin = USER && USER.role === 'admin';
+  const simpleMode = document.getElementById('setSimpleMode').checked;
   document.getElementById('adminSettingsGroup').style.display = isAdmin ? '' : 'none';
-  document.getElementById('userMgmtGroup').style.display = isAdmin ? '' : 'none';
-  document.getElementById('auditLogGroup').style.display = isAdmin ? '' : 'none';
+  // 简易模式下隐藏用户管理和审计日志
+  document.getElementById('userMgmtGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
+  document.getElementById('auditLogGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
   loadSettings();
-  if(isAdmin) loadAuditLogs();
+  if(isAdmin && !simpleMode) loadAuditLogs();
 }
 function closeSettings(){
   document.getElementById('drawerMask').classList.remove('on');
@@ -1908,6 +1960,10 @@ function togglePinVisible(){
 function updatePinRowVisibility(){
   const simpleMode = document.getElementById('setSimpleMode').checked;
   document.getElementById('pinSettingRow').style.display = simpleMode ? '' : 'none';
+  // 简易模式下隐藏用户管理和审计日志
+  const isAdmin = USER && USER.role === 'admin';
+  document.getElementById('userMgmtGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
+  document.getElementById('auditLogGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
 }
 document.getElementById('setSimpleMode').onchange = updatePinRowVisibility;
 document.getElementById('btnSettings').onclick = openSettings;

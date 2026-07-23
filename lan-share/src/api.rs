@@ -158,8 +158,27 @@ fn validate_password(pwd: &str) -> Result<(), String> {
 
 // 登录 / 登出
 
+/// GET /api/mode — 获取当前认证模式（无需登录）
+pub async fn get_mode(State(state): State<Arc<WebDavState>>) -> Response {
+    let simple_mode = state.db.get_admin_setting("simple_mode")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    ok_json(&serde_json::json!({
+        "simple_mode": simple_mode,
+        "device_name": state.device_name,
+    }))
+}
+
 /// POST /api/login
 pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginReq>) -> Response {
+    // 简易模式下禁用账号登录
+    let simple_mode = state.db.get_admin_setting("simple_mode")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if simple_mode {
+        return json_resp(StatusCode::FORBIDDEN, r#"{"error":"简易模式下请使用 PIN 码连接"}"#);
+    }
+
     // 暴力破解防护：检查是否被锁定（数据库持久化）
     let (locked, remain_secs) = state.db.is_account_locked(&req.username);
     if locked {

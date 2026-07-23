@@ -526,13 +526,13 @@ async fn handle_frame(
                 Ok(m) => m,
                 Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
             };
-            let user = if let Some(u) = state.db.verify_session(&msg.token) {
-                Some(u)
-            } else {
-                let simple_mode = state.db.get_admin_setting("simple_mode")
-                    .map(|v| v != "false")
-                    .unwrap_or(true);
-                if simple_mode && msg.token == state.pin {
+            let simple_mode = state.db.get_admin_setting("simple_mode")
+                .map(|v| v != "false")
+                .unwrap_or(true);
+            // 简易模式和账号模式互斥
+            let user = if simple_mode {
+                // 简易模式: 只允许 PIN
+                if msg.token == state.pin {
                     Some(crate::db::User {
                         id: 0,
                         username: "share".to_string(),
@@ -545,6 +545,9 @@ async fn handle_frame(
                 } else {
                     None
                 }
+            } else {
+                // 账号模式: 只允许 session token
+                state.db.verify_session(&msg.token)
             };
 
             let mut c = conn.lock().await;

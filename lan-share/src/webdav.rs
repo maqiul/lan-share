@@ -69,6 +69,7 @@ pub async fn start_webdav_server(
 
     let app = Router::new()
         // REST API
+        .route("/api/mode", get(crate::api::get_mode))
         .route("/api/login", post(crate::api::login))
         .route("/api/logout", post(crate::api::logout))
         .route("/api/me", get(crate::api::me))
@@ -174,6 +175,7 @@ async fn handle_request(
 /// 1. Bearer token（Web UI 会话）
 /// 2. Basic auth username:password（账号模式，WebDAV 客户端）
 /// 3. Basic auth share:PIN 或 ?token=PIN（简易模式，需 admin 开启 simple_mode）
+/// 注意：简易模式和账号模式互斥
 fn authenticate(state: &WebDavState, headers: &HeaderMap, uri: &Uri) -> Option<crate::db::User> {
     // 检查简易模式是否启用（默认 true，保持兼容）
     let simple_mode = state.db.get_admin_setting("simple_mode")
@@ -182,9 +184,12 @@ fn authenticate(state: &WebDavState, headers: &HeaderMap, uri: &Uri) -> Option<c
 
     // 1. Authorization header
     if let Some(auth) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        // Bearer token
+        // Bearer token（仅账号模式）
         if let Some(token) = auth.strip_prefix("Bearer ") {
-            return state.db.verify_session(token);
+            if !simple_mode {
+                return state.db.verify_session(token);
+            }
+            return None;
         }
         // Basic auth
         if let Some(b64) = auth.strip_prefix("Basic ") {
@@ -192,43 +197,48 @@ fn authenticate(state: &WebDavState, headers: &HeaderMap, uri: &Uri) -> Option<c
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(b64) {
                 if let Ok(creds) = String::from_utf8(decoded) {
                     if let Some((username, password)) = creds.split_once(':') {
-                        // 简易模式: share:PIN（需开启 simple_mode）
-                        if simple_mode && username == "share" && password == state.pin {
-                            return Some(crate::db::User {
-                                id: 0,
-                                username: "share".to_string(),
-                                role: "user".to_string(),
-                                shared_dir: None,
-                                must_change_password: false,
-                                permissions: "read,write,delete,rename,share,mkdir".to_string(),
-                                quota_mb: 0,
-                            });
+                        if simple_mode {
+                            // 简易模式: 只允许 share:PIN
+                            if username == "share" && password == state.pin {
+                                return Some(crate::db::User {
+                                    id: 0,
+                                    username: "share".to_string(),
+                                    role: "user".to_string(),
+                                    shared_dir: None,
+                                    must_change_password: false,
+                                    permissions: "read,write,delete,rename,share,mkdir".to_string(),
+                                    quota_mb: 0,
+                                });
+                            }
+                            return None;
+                        } else {
+                            // 账号模式: 只允许 username:password
+                            return state.db.verify_login(username, password);
                         }
-                        // 账号模式: username:password
-                        return state.db.verify_login(username, password);
                     }
                 }
             }
         }
     }
 
-    // 2. URL query token（?token=xxx）：先试 session token，再试 PIN（简易模式）
+    // 2. URL query token（?token=xxx）
     if let Some(token) = query_token(uri) {
-        // 2a. 会话 token（Web UI 下载链接）
-        if let Some(user) = state.db.verify_session(&token) {
-            return Some(user);
-        }
-        // 2b. PIN（简易模式）
-        if simple_mode && token == state.pin {
-            return Some(crate::db::User {
-                id: 0,
-                username: "share".to_string(),
-                role: "user".to_string(),
-                shared_dir: None,
-                must_change_password: false,
-                permissions: "read,write,delete,rename,share,mkdir".to_string(),
-                quota_mb: 0,
-            });
+        if simple_mode {
+            // 简易模式: 只允许 PIN
+            if token == state.pin {
+                return Some(crate::db::User {
+                    id: 0,
+                    username: "share".to_string(),
+                    role: "user".to_string(),
+                    shared_dir: None,
+                    must_change_password: false,
+                    permissions: "read,write,delete,rename,share,mkdir".to_string(),
+                    quota_mb: 0,
+                });
+            }
+        } else {
+            // 账号模式: 只允许 session token
+            return state.db.verify_session(&token);
         }
     }
 
