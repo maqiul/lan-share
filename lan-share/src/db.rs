@@ -466,8 +466,21 @@ impl Database {
 
     /// 修改密码（同时清除 must_change_password 标记）
     pub fn change_password(&self, user_id: i64, new_password: &str) -> Result<(), String> {
-        let pw_hash = hash(new_password, DEFAULT_COST).map_err(|e| e.to_string())?;
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 新密码不能与旧密码相同
+        let old_hash: String = conn
+            .query_row(
+                "SELECT password_hash FROM users WHERE id = ?1",
+                params![user_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| "用户不存在".to_string())?;
+        if verify(new_password, &old_hash).unwrap_or(false) {
+            return Err("新密码不能与当前密码相同".to_string());
+        }
+
+        let pw_hash = hash(new_password, DEFAULT_COST).map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE users SET password_hash = ?1, must_change_password = 0 WHERE id = ?2",
             params![pw_hash, user_id],
