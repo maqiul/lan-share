@@ -441,16 +441,12 @@ fn show_message_box(text: &str, title: &str, _flags: u32) {
     eprintln!("[{}] {}", title, text);
 }
 
-/// 隐藏控制台窗口，让程序在后台运行
+/// 释放控制台，让程序完全在后台运行（窗口消失）
 #[cfg(windows)]
 fn hide_console() {
-    use windows::Win32::System::Console::GetConsoleWindow;
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    use windows::Win32::System::Console::FreeConsole;
     unsafe {
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_invalid() {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
+        let _ = FreeConsole();
     }
 }
 
@@ -636,6 +632,25 @@ fn main() {
         }
     }
 
+    // 单实例保护：只允许运行一个客户端
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+        use windows::core::w;
+        unsafe {
+            let _ = CreateMutexW(None, true, w!("Global\\LanShareClient_Mutex"));
+            if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
+                show_message_box(
+                    "LanShare 客户端已在运行中。",
+                    "LanShare 客户端",
+                    0x40, // MB_ICONINFORMATION
+                );
+                return;
+            }
+        }
+    }
+
     // 确保 WinFsp DLL 可被 delayload 找到
     #[cfg(windows)]
     {
@@ -643,6 +658,15 @@ fn main() {
         use windows::core::w;
         unsafe {
             let _ = SetDllDirectoryW(w!("C:\\Program Files (x86)\\WinFsp\\bin"));
+        }
+
+        // 检测 WinFsp 是否已安装
+        let winfsp_dll = std::path::Path::new(r"C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll");
+        if !winfsp_dll.exists() {
+            let msg = "未检测到 WinFsp，请先安装 WinFsp 2.x：\n\nhttps://winfsp.dev\n\n安装完成后重新运行本程序。";
+            eprintln!("\n  ❌ {}", msg);
+            show_message_box(msg, "LanShare 客户端 - 缺少 WinFsp", 0x10);
+            return;
         }
     }
 
@@ -791,9 +815,12 @@ fn svc_start(
     println!("  ╚══════════════════════════════════════════╝");
     println!();
 
-    // 挂载成功后隐藏控制台，后台运行
+    // 挂载成功后延迟关闭控制台，后台运行
     #[cfg(windows)]
-    hide_console();
+    {
+        std::thread::sleep(Duration::from_secs(2));
+        hide_console();
+    }
 
     Ok(LanShareFsHost { host })
 }
