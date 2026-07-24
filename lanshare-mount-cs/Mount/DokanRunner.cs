@@ -30,13 +30,78 @@ namespace LanShareMount.Mount
                 Console.Error.WriteLine("Dokan driver not installed. Run DokanInstall_0.6.0.exe first.");
                 return 1;
             }
-            // Tell user if it's an unsupported version
-            // Dokan 0.6.0 returns 0x00000600, 0.7.4 returns 0x00000704, 1.x returns 0xA00/0xB00 etc.
             if (ver != 0 && ver < 600UL)
             {
                 Console.Error.WriteLine("Dokan version too old ({0}). Need >= 0.6.0 (encoded as 600).", ver);
                 return 1;
             }
+
+            char driveLetter = char.ToUpperInvariant(opts.Drive[0]);
+
+            // Single-instance guard: refuse to start if another copy is already
+            // mounted on this drive letter. Uses a PID file in %TEMP% so a
+            // crashed process doesn't permanently block the drive.
+            int myPid = System.Diagnostics.Process.GetCurrentProcess().Id;
+            string lockPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "lanshare-mount-" + driveLetter + ".lock");
+            if (System.IO.File.Exists(lockPath))
+            {
+                int existingPid = 0;
+                try { existingPid = int.Parse(System.IO.File.ReadAllText(lockPath).Trim()); } catch { }
+                if (existingPid > 0)
+                {
+                    bool alive = false;
+                    try
+                    {
+                        var p = System.Diagnostics.Process.GetProcessById(existingPid);
+                        alive = !p.HasExited;
+                        // Sanity: make sure it's actually our process
+                        alive = alive && System.IO.File.Exists(
+                            System.IO.Path.Combine(System.IO.Path.GetTempPath(), "lanshare-mount-" + existingPid + ".alive"));
+                    }
+                    catch { alive = false; }
+                    if (alive)
+                    {
+                        Console.Error.WriteLine(
+                            "Another Lanshare mount instance is already running on {0}: (PID {1}).",
+                            driveLetter, existingPid);
+                        Console.Error.WriteLine("Use that one, or kill it first.");
+                        return 1;
+                    }
+                    Console.WriteLine("Removing stale lock file from previous run (PID {0}).", existingPid);
+                    try { System.IO.File.Delete(lockPath); } catch { }
+                }
+            }
+            System.IO.File.WriteAllText(lockPath, myPid.ToString());
+            string heartbeatPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), "lanshare-mount-" + myPid + ".alive");
+            System.IO.File.WriteAllText(heartbeatPath, "1");
+
+            try
+            {
+                // If a previous mapping is still around on the same drive letter,
+                // try to unmount it first so DokanMain doesn't fail with -5.
+                string mountPoint = driveLetter + ":\\";
+                bool removed = DokanNative.DokanRemoveMountPoint(mountPoint);
+                if (removed)
+                {
+                    Console.WriteLine("Removed stale mount on {0}:", driveLetter);
+                    System.Threading.Thread.Sleep(500);
+                }
+
+                return RunMountInner(opts, driveLetter, mountPoint);
+            }
+            finally
+            {
+                // Always clean up lock + heartbeat so a future process can start
+                try { System.IO.File.Delete(lockPath); } catch { }
+                try { System.IO.File.Delete(heartbeatPath); } catch { }
+            }
+        }
+
+        static int RunMountInner(MountOptions opts, char driveLetter, string mountPoint)
+        {
 
             var wsp = new WspClient(opts.Host, opts.Port, opts.Pin ?? opts.Pass);
             try
@@ -51,9 +116,6 @@ namespace LanShareMount.Mount
                 wsp.Dispose();
                 return 1;
             }
-
-            // Map "L:" → "L:\"
-            string mountPoint = char.ToUpperInvariant(opts.Drive[0]) + ":\\";
 
             var fs = new LanShareFs(wsp);
             var ops = fs.BuildOps();
@@ -85,6 +147,13 @@ namespace LanShareMount.Mount
             wsp.Dispose();
 
             if (status == 0 || status == -4) return 0;
+            if (status == -5)
+            {
+                Console.Error.WriteLine(
+                    "Mount failed: drive {0}: is already in use by another application " +
+                    "or a stale Dokan mount. Try a different drive letter.", driveLetter);
+                return 1;
+            }
             Console.Error.WriteLine("Mount failed with status {0}", status);
             return 1;
         }

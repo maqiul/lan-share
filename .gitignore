@@ -7,3 +7,5 @@
 dl_test.bin
 /test_shared
 /shared
+**/obj/
+**/bin/

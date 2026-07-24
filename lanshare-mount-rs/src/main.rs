@@ -438,7 +438,61 @@ fn main() {
     
     println!("Dokan version: {}", unsafe { DokanVersion() });
     println!("Connecting to {}:{} ...", host, port);
-    
+
+    // Single-instance guard: refuse to start if another copy is already mounted
+    // on this drive letter. Uses a PID file in %TEMP% so a crashed process
+    // doesn't permanently block the drive.
+    let lock_path = std::env::temp_dir().join(format!("lanshare-mount-{}.lock", drive));
+    if lock_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&lock_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                // Is that PID still alive?
+                let still_alive = std::path::Path::new(&format!("C:\\Windows\\Temp\\lanshare-{}.alive", pid)).exists();
+                if still_alive {
+                    eprintln!(
+                        "Another Lanshare mount instance is already running on {}: (PID {}).\n\
+                         Use that one, or kill it first.",
+                        drive, pid
+                    );
+                    std::process::exit(1);
+                } else {
+                    println!("Removing stale lock file from previous run (PID {}).", pid);
+                    let _ = std::fs::remove_file(&lock_path);
+                }
+            }
+        }
+    }
+    let _ = std::fs::write(&lock_path, std::process::id().to_string());
+    // Heartbeat file the lock checker reads
+    let heartbeat = std::path::Path::new(&format!("C:\\Windows\\Temp\\lanshare-{}.alive", std::process::id()));
+    let _ = std::fs::write(heartbeat, b"1");
+    let hb_path_str = heartbeat.to_string_lossy().into_owned();
+
+    // If a previous mapping is still around on the same drive letter, try to
+    // unmount it first so DokanMain doesn't fail with -5 (ERROR_ALREADY_ASSIGNED).
+    {
+        let mount_point = format!("{}:\\", drive);
+        let mount_wide: Vec<u16> = mount_point.encode_utf16().chain(std::iter::once(0)).collect();
+        let removed = unsafe { DokanRemoveMountPoint(mount_wide.as_ptr()) };
+        if removed != 0 {
+            println!("Removed stale mount on {}:", drive);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    // If a previous mapping is still around on the same drive letter, try to
+    // unmount it first so DokanMain doesn't fail with -5 (ERROR_ALREADY_ASSIGNED).
+    {
+        let mount_point = format!("{}:\\", drive);
+        let mount_wide: Vec<u16> = mount_point.encode_utf16().chain(std::iter::once(0)).collect();
+        let removed = unsafe { DokanRemoveMountPoint(mount_wide.as_ptr()) };
+        if removed != 0 {
+            println!("Removed stale mount on {}:", drive);
+            // Give Dokan a moment to actually release the device
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
     // Create WSP client
     let client = Arc::new(WspClient::new(&format!("{}:{}", host, port), pin));
     
@@ -497,6 +551,20 @@ fn main() {
     };
     
     let status = unsafe { DokanMain(&options, &operations) };
-    
-    println!("Dokan exited with status {}", status);
+
+    // Clean up PID lock + heartbeat on exit
+    let _ = std::fs::remove_file(&lock_path);
+    let _ = std::fs::remove_file(&hb_path_str);
+
+    if status == -5 {
+        eprintln!(
+            "Mount failed: drive {}: is already in use by another application or a \
+             stale Dokan mount. Try a different drive letter.",
+            drive
+        );
+    } else if status != 0 && status != -4 {
+        eprintln!("Dokan exited with status {}", status);
+    } else {
+        println!("Dokan exited cleanly with status {}", status);
+    }
 }
