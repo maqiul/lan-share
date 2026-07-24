@@ -92,9 +92,23 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
     auth.strip_prefix("Bearer ").map(|s| s.to_string())
 }
 
-/// 验证 Bearer token，返回 User
+/// 验证 Bearer token，返回 User（简易模式下 PIN 也放行）
 pub fn auth_user(state: &WebDavState, headers: &HeaderMap) -> Option<User> {
     let token = extract_token(headers)?;
+    let simple_mode = state.db.get_admin_setting("simple_mode")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    if simple_mode && token == state.pin {
+        return Some(User {
+            id: 0,
+            username: "share".to_string(),
+            role: "user".to_string(),
+            shared_dir: None,
+            must_change_password: false,
+            permissions: "read,write,delete,rename,share,mkdir".to_string(),
+            quota_mb: 0,
+        });
+    }
     state.db.verify_session(&token)
 }
 

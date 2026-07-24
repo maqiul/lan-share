@@ -1990,6 +1990,7 @@ function updatePinRowVisibility(){
 document.getElementById('setSimpleMode').onchange = updatePinRowVisibility;
 document.getElementById('btnSettings').onclick = openSettings;
 document.getElementById('drawerMask').onclick = closeSettings;
+let _origAdminCfg = null; // 加载时快照，用于判断是否需要重启
 async function loadSettings(){
   const isAdmin = USER && USER.role === 'admin';
   try{
@@ -2004,6 +2005,16 @@ async function loadSettings(){
       document.getElementById('setSimpleMode').checked = cfg.simple_mode !== 'false';
       document.getElementById('setPin').value = cfg.pin || '';
       updatePinRowVisibility();
+      // 快照原始值
+      _origAdminCfg = {
+        lsp_port: cfg.lsp_port || 12345,
+        webdav_port: cfg.webdav_port || 8080,
+        device_name: cfg.device_name || '',
+        shared_dir: cfg.shared_dir || '',
+        auto_browser: cfg.auto_browser !== false,
+        simple_mode: cfg.simple_mode !== 'false',
+        pin: cfg.pin || '',
+      };
     }
     const ur = await api('GET', '/api/user/settings');
     const ucfg = await ur.json();
@@ -2012,6 +2023,7 @@ async function loadSettings(){
 }
 async function saveSettings(){
   const isAdmin = USER && USER.role === 'admin';
+  let adminChanged = false;
   try{
     if(isAdmin){
       const lsp = parseInt(document.getElementById('setLspPort').value) || 12345;
@@ -2020,6 +2032,18 @@ async function saveSettings(){
       const simpleMode = document.getElementById('setSimpleMode').checked;
       const pin = document.getElementById('setPin').value.trim();
       if(simpleMode && pin && pin.length < 4){ toast(t('pinTooShort'), 'err'); return; }
+      // 对比是否有系统级变更
+      if(_origAdminCfg){
+        adminChanged = (
+          lsp !== _origAdminCfg.lsp_port ||
+          wd !== _origAdminCfg.webdav_port ||
+          document.getElementById('setDeviceName').value.trim() !== _origAdminCfg.device_name ||
+          document.getElementById('setSharedDir').value.trim() !== _origAdminCfg.shared_dir ||
+          document.getElementById('setAutoBrowser').checked !== _origAdminCfg.auto_browser ||
+          simpleMode !== _origAdminCfg.simple_mode ||
+          pin !== _origAdminCfg.pin
+        );
+      }
       await api('PUT', '/api/admin/settings', {
         lsp_port: lsp, webdav_port: wd,
         device_name: document.getElementById('setDeviceName').value.trim(),
@@ -2029,15 +2053,13 @@ async function saveSettings(){
         pin: pin || undefined,
       });
     }
-    await api('PUT', '/api/user/settings', {
-      view: document.getElementById('setViewMode').value,
-    });
-    view = document.getElementById('setViewMode').value;
-    localStorage.setItem('lsp_view', view);
+    const newView = document.getElementById('setViewMode').value;
+    await api('PUT', '/api/user/settings', { view: newView });
+    setView(newView); // 立即切换视图 + render
     closeSettings();
 
-    if(isAdmin){
-      // 系统设置已保存 → 自动重启服务
+    if(isAdmin && adminChanged){
+      // 只有系统设置变了才重启
       showRestartOverlay();
       try{ await api('POST', '/api/admin/restart'); }catch(e){}
       await waitForServer();
