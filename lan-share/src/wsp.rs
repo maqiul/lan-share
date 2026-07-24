@@ -547,7 +547,7 @@ async fn handle_frame(
                 .unwrap_or(true);
             // 简易模式和账号模式互斥
             let user = if simple_mode {
-                // 简易模式: 只允许 PIN
+                // 简易模式: 优先 PIN，其次 session token（admin 登录场景）
                 if msg.token == state.pin {
                     Some(crate::db::User {
                         id: 0,
@@ -559,7 +559,8 @@ async fn handle_frame(
                         quota_mb: 0,
                     })
                 } else {
-                    None
+                    // admin 通过 /api/login 拿到的 session token
+                    state.db.verify_session(&msg.token)
                 }
             } else {
                 // 账号模式: 只允许 session token
