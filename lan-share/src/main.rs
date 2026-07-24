@@ -8,7 +8,7 @@ use tracing::{info, error};
 mod api;
 mod db;
 mod discovery;
-mod webdav;
+mod server;
 mod wsp;
 
 // 配置文件
@@ -22,9 +22,9 @@ struct Config {
     /// LSP 协议端口
     #[serde(default = "default_lsp_port")]
     lsp_port: u16,
-    /// WebDAV / Web UI 端口（0 = 禁用）
-    #[serde(default = "default_webdav_port")]
-    webdav_port: u16,
+    /// Web 界面端口（0 = 禁用）
+    #[serde(default = "default_web_port", alias = "webdav_port")]
+    web_port: u16,
     /// 访问 PIN
     #[serde(default = "default_pin")]
     pin: String,
@@ -38,7 +38,7 @@ struct Config {
 
 fn default_shared_dir() -> String { "./shared".to_string() }
 fn default_lsp_port() -> u16 { 9820 }
-fn default_webdav_port() -> u16 { 8080 }
+fn default_web_port() -> u16 { 8080 }
 fn default_pin() -> String { "123456".to_string() }
 fn default_true() -> bool { true }
 
@@ -47,7 +47,7 @@ impl Default for Config {
         Config {
             shared_dir: default_shared_dir(),
             lsp_port: default_lsp_port(),
-            webdav_port: default_webdav_port(),
+            web_port: default_web_port(),
             pin: default_pin(),
             device_name: String::new(),
             auto_browser: true,
@@ -65,8 +65,8 @@ shared_dir = "./shared"
 # LSP 协议端口（lan-share CLI 客户端连接用）
 lsp_port = 9820
 
-# WebDAV / Web 界面端口（0 = 禁用 WebDAV 和网页界面）
-webdav_port = 8080
+# Web 界面端口（0 = 禁用网页界面）
+web_port = 8080
 
 # 访问 PIN（简易模式用，Web UI 登录请用账号密码）
 pin = "123456"
@@ -173,9 +173,9 @@ enum Commands {
         dir: PathBuf,
         #[arg(long, default_value = "123456")]
         pin: String,
-        /// WebDAV 端口（用于映射网络驱动器），0 表示禁用
+        /// Web 界面端口，0 表示禁用
         #[arg(long, default_value = "8080")]
-        webdav_port: u16,
+        web_port: u16,
         /// 启动后不自动打开浏览器
         #[arg(long)]
         no_browser: bool,
@@ -276,8 +276,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Serve { port, name, dir, pin, webdav_port, no_browser }) => {
-            run_server(port, name, dir, pin, webdav_port, !no_browser, false).await?
+        Some(Commands::Serve { port, name, dir, pin, web_port, no_browser }) => {
+            run_server(port, name, dir, pin, web_port, !no_browser, false).await?
         }
         Some(Commands::List { addr, path, recursive, pin }) => run_list(&addr, &path, recursive, &pin).await?,
         Some(Commands::Download { addr, file, output, pin }) => run_download(&addr, &file, output, &pin).await?,
@@ -304,7 +304,7 @@ async fn connect_and_auth(addr: &str, pin: &str) -> Result<LspClient, Box<dyn st
     Ok(client)
 }
 
-async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, webdav_port: u16, auto_browser: bool, with_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, web_port: u16, auto_browser: bool, with_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
     let device_name = name.unwrap_or_else(|| {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -338,20 +338,15 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
     info!("Device: {}", device_name);
     info!("Shared dir: {}", dir.display());
     info!("LSP protocol: {}:{}", local_ip, port);
-    if webdav_port > 0 {
-        info!("WebDAV / Web UI: http://{}:{}", local_ip, webdav_port);
+    if web_port > 0 {
+        info!("Web UI: http://{}:{}", local_ip, web_port);
         let simple_mode = db.get_admin_setting("simple_mode")
             .map(|v| v != "false")
             .unwrap_or(true);
         if simple_mode {
             info!("PIN: {} (简易模式已开启)", pin);
-            info!("--- 映射网络驱动器 ---");
-            info!("  账号方式: net use Z: \\\\{}@{}\\DavWWWRoot /user:用户名 密码", local_ip, webdav_port);
-            info!("  PIN 方式: net use Z: \\\\{}@{}\\DavWWWRoot /user:share {}", local_ip, webdav_port, pin);
         } else {
             info!("简易模式已关闭，请使用账号密码登录");
-            info!("--- 映射网络驱动器 ---");
-            info!("  net use Z: \\\\{}@{}\\DavWWWRoot /user:用户名 密码", local_ip, webdav_port);
         }
     }
 
@@ -360,8 +355,8 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         show_fatal_error(&msg);
         return Err(msg.into());
     }
-    if webdav_port > 0 {
-        if let Err(msg) = check_tcp_port(webdav_port).await {
+    if web_port > 0 {
+        if let Err(msg) = check_tcp_port(web_port).await {
             show_fatal_error(&msg);
             return Err(msg.into());
         }
@@ -376,19 +371,19 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         }
     });
 
-    // WebDAV 服务
-    if webdav_port > 0 {
-        let webdav_dir = dir.clone();
-        let webdav_pin = pin.clone();
-        let webdav_name = device_name.clone();
-        let webdav_ip = local_ip.clone();
-        let webdav_cfg = config_path();
-        let webdav_db = db.clone();
-        let webdav_handle = tokio::spawn(async move {
-            if let Err(e) = webdav::start_webdav_server(
-                webdav_port, webdav_dir, webdav_pin, webdav_name, webdav_ip, port, webdav_cfg, webdav_db,
+    // Web 服务（Web UI + API + WSP）
+    if web_port > 0 {
+        let web_dir = dir.clone();
+        let web_pin = pin.clone();
+        let web_name = device_name.clone();
+        let web_ip = local_ip.clone();
+        let web_cfg = config_path();
+        let web_db = db.clone();
+        let web_handle = tokio::spawn(async move {
+            if let Err(e) = server::start_web_server(
+                web_port, web_dir, web_pin, web_name, web_ip, port, web_cfg, web_db,
             ).await {
-                error!("WebDAV server error: {}", e);
+                error!("Web server error: {}", e);
             }
         });
 
@@ -399,7 +394,7 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         let discovery_info = Arc::new(discovery::ServerInfo {
             name: device_name.clone(),
             ip: local_ip.clone(),
-            webdav_port,
+            web_port,
             lsp_port: port,
             version: env!("CARGO_PKG_VERSION").to_string(),
             simple_mode: disc_simple,
@@ -412,7 +407,7 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
 
         // 自动打开浏览器（延迟 800ms 等服务就绪）
         if auto_browser {
-            let url = format!("http://127.0.0.1:{}", webdav_port);
+            let url = format!("http://127.0.0.1:{}", web_port);
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                 open_browser(&url);
@@ -421,7 +416,7 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
 
         // 系统托盘常驻（_tray 持有到函数结束，避免图标被销毁）
         let _tray = if with_tray {
-            let url = format!("http://127.0.0.1:{}", webdav_port);
+            let url = format!("http://127.0.0.1:{}", web_port);
             match setup_tray(&url) {
                 Ok(t) => {
                     info!("托盘图标就绪（右键可打开界面 / 退出）");
@@ -438,7 +433,7 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
 
         tokio::select! {
             _ = lsp_handle => {},
-            _ = webdav_handle => {},
+            _ = web_handle => {},
         }
     } else {
         lsp_handle.await?;
@@ -461,17 +456,17 @@ async fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
     println!("  共享目录: {}", shared_dir.display());
     println!("  访问 PIN: {}", cfg.pin);
     println!("  LSP 端口: {}", cfg.lsp_port);
-    if cfg.webdav_port > 0 {
-        println!("  WebDAV / 界面端口: {}", cfg.webdav_port);
+    if cfg.web_port > 0 {
+        println!("  Web 界面端口: {}", cfg.web_port);
     } else {
-        println!("  WebDAV / 界面: 已禁用");
+        println!("  Web 界面: 已禁用");
     }
     println!();
     println!("  提示: 浏览器将自动打开；服务在托盘后台常驻");
     println!("        右键托盘图标可打开界面 / 退出");
     println!("        关闭本窗口将停止服务");
     println!();
-    run_server(cfg.lsp_port, name, shared_dir, cfg.pin.clone(), cfg.webdav_port, cfg.auto_browser, true).await
+    run_server(cfg.lsp_port, name, shared_dir, cfg.pin.clone(), cfg.web_port, cfg.auto_browser, true).await
 }
 
 /// 打开默认浏览器（各平台原生实现，零依赖）

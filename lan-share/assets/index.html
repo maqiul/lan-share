@@ -307,7 +307,7 @@ main{flex:1;display:flex;min-height:0}
       <div class="hchip"><span class="dot"></span> <span data-i18n="online">在线</span></div>
       <div class="hchip" id="wspChip" style="display:none">⚡ <b style="color:var(--cyan)">WSP</b></div>
       <div class="hchip">📁 <b id="hDevice">{{DEVICE_NAME}}</b></div>
-      <div class="hchip">🌐 <b id="hAddr">{{LOCAL_IP}}:{{WEBDAV_PORT}}</b></div>
+      <div class="hchip">🌐 <b id="hAddr">{{LOCAL_IP}}:{{WEB_PORT}}</b></div>
       <div class="hchip">⏱ <b id="hUptime">--</b></div>
       <select id="langSelect" class="setinput" style="width:auto;padding:4px 8px;font-size:12px;margin-left:8px">
         <option value="zh-CN">中文</option>
@@ -352,23 +352,21 @@ main{flex:1;display:flex;min-height:0}
         <div class="kv"><span data-i18n="device">设备</span><b>{{DEVICE_NAME}}</b></div>
         <div class="kv"><span data-i18n="sharedDir">共享目录</span><b title="{{SHARED_DIR}}">{{SHARED_DIR}}</b></div>
         <div class="kv"><span>LSP 协议</span><b>{{LOCAL_IP}}:{{LSP_PORT}}</b></div>
-        <div class="kv"><span>WebDAV</span><b>{{LOCAL_IP}}:{{WEBDAV_PORT}}</b></div>
-        <div class="kv"><span>WSP 协议</span><b>ws://{{LOCAL_IP}}:{{WEBDAV_PORT}}/wsp</b></div>
+        <div class="kv"><span>Web 端口</span><b>{{LOCAL_IP}}:{{WEB_PORT}}</b></div>
+        <div class="kv"><span>WSP 协议</span><b>ws://{{LOCAL_IP}}:{{WEB_PORT}}/wsp</b></div>
         <div class="kv"><span data-i18n="fileCount">文件数</span><b id="sCount">--</b></div>
       </div>
       <div class="card">
         <h4 data-i18n="connectDevice">连接此设备</h4>
         <div class="urlbox">
-          <code id="connUrl">http://{{LOCAL_IP}}:{{WEBDAV_PORT}}</code>
+          <code id="connUrl">http://{{LOCAL_IP}}:{{WEB_PORT}}</code>
           <button class="btn btn-ghost" style="padding:6px 10px" onclick="copyUrl()" data-i18n="copy">复制</button>
         </div>
         <div class="hint">
-          <b style="color:var(--txt)" data-i18n="mapDrive">映射驱动器：</b><br>
-          <code>net use Z: \\{{LOCAL_IP}}@{{WEBDAV_PORT}}\DavWWWRoot /user:share PIN</code><br>
           <b style="color:var(--txt)" data-i18n="cliTransfer">CLI 传输：</b><br>
           <code>lan-share list {{LOCAL_IP}}:{{LSP_PORT}}</code><br>
           <b style="color:var(--txt)">WSP 协议：</b><br>
-          <code>ws://{{LOCAL_IP}}:{{WEBDAV_PORT}}/wsp</code>
+          <code>ws://{{LOCAL_IP}}:{{WEB_PORT}}/wsp</code>
         </div>
       </div>
       <div class="card">
@@ -484,9 +482,9 @@ main{flex:1;display:flex;min-height:0}
         <input class="setinput" id="setLspPort" type="number" min="1" max="65535" placeholder="12345">
       </label>
       <label class="setitem">
-        <span class="setlabel" data-i18n="webdavPort">WebDAV 端口</span>
-        <span class="setdesc" data-i18n="webdavPortDesc">Web 界面与驱动器映射端口</span>
-        <input class="setinput" id="setWebdavPort" type="number" min="1" max="65535" placeholder="8080">
+        <span class="setlabel" data-i18n="webPort">Web 端口</span>
+        <span class="setdesc" data-i18n="webPortDesc">Web 界面端口</span>
+        <input class="setinput" id="setWebPort" type="number" min="1" max="65535" placeholder="8080">
       </label>
       <label class="setitem">
         <span class="setlabel" data-i18n="deviceName">设备名称</span>
@@ -694,7 +692,6 @@ const I18N = {
     fileCount: '文件数',
     connectDevice: '连接此设备',
     copy: '复制',
-    mapDrive: '映射驱动器：',
     cliTransfer: 'CLI 传输：',
     quickActions: '快捷操作',
     uploadToCurrent: '⬆ 上传到当前目录',
@@ -717,8 +714,8 @@ const I18N = {
     globalSettings: '🌐 全局设置',
     lspPort: 'LSP 协议端口',
     lspPortDesc: 'CLI 二进制传输使用的端口',
-    webdavPort: 'WebDAV 端口',
-    webdavPortDesc: 'Web 界面与驱动器映射端口',
+    webPort: 'Web 端口',
+    webPortDesc: 'Web 界面端口',
     deviceName: '设备名称',
     deviceNameDesc: '在网络中显示的名称',
     sharedRoot: '共享根目录',
@@ -827,7 +824,6 @@ const I18N = {
     fileCount: 'Files',
     connectDevice: 'Connect to Device',
     copy: 'Copy',
-    mapDrive: 'Map Drive:',
     cliTransfer: 'CLI Transfer:',
     quickActions: 'Quick Actions',
     uploadToCurrent: '⬆ Upload to Current',
@@ -850,8 +846,8 @@ const I18N = {
     globalSettings: '🌐 Global Settings',
     lspPort: 'LSP Port',
     lspPortDesc: 'Port for CLI binary transfer',
-    webdavPort: 'WebDAV Port',
-    webdavPortDesc: 'Port for Web UI and drive mapping',
+    webPort: 'Web Port',
+    webPortDesc: 'Port for Web UI',
     deviceName: 'Device Name',
     deviceNameDesc: 'Name shown on network',
     sharedRoot: 'Shared Root',
@@ -2000,7 +1996,7 @@ async function loadSettings(){
       const r = await api('GET', '/api/admin/settings');
       const cfg = await r.json();
       document.getElementById('setLspPort').value = cfg.lsp_port || 12345;
-      document.getElementById('setWebdavPort').value = cfg.webdav_port || 8080;
+      document.getElementById('setWebPort').value = cfg.web_port || 8080;
       document.getElementById('setDeviceName').value = cfg.device_name || '';
       document.getElementById('setSharedDir').value = cfg.shared_dir || '';
       document.getElementById('setAutoBrowser').checked = cfg.auto_browser !== false;
@@ -2010,7 +2006,7 @@ async function loadSettings(){
       // 快照原始值
       _origAdminCfg = {
         lsp_port: cfg.lsp_port || 12345,
-        webdav_port: cfg.webdav_port || 8080,
+        web_port: cfg.web_port || 8080,
         device_name: cfg.device_name || '',
         shared_dir: cfg.shared_dir || '',
         auto_browser: cfg.auto_browser !== false,
@@ -2029,7 +2025,7 @@ async function saveSettings(){
   try{
     if(isAdmin){
       const lsp = parseInt(document.getElementById('setLspPort').value) || 12345;
-      const wd = parseInt(document.getElementById('setWebdavPort').value) || 8080;
+      const wd = parseInt(document.getElementById('setWebPort').value) || 8080;
       if(lsp<1||lsp>65535||wd<1||wd>65535){ toast('端口范围 1-65535', 'err'); return; }
       const simpleMode = document.getElementById('setSimpleMode').checked;
       const pin = document.getElementById('setPin').value.trim();
@@ -2038,7 +2034,7 @@ async function saveSettings(){
       if(_origAdminCfg){
         adminChanged = (
           lsp !== _origAdminCfg.lsp_port ||
-          wd !== _origAdminCfg.webdav_port ||
+          wd !== _origAdminCfg.web_port ||
           document.getElementById('setDeviceName').value.trim() !== _origAdminCfg.device_name ||
           document.getElementById('setSharedDir').value.trim() !== _origAdminCfg.shared_dir ||
           document.getElementById('setAutoBrowser').checked !== _origAdminCfg.auto_browser ||
@@ -2047,7 +2043,7 @@ async function saveSettings(){
         );
       }
       await api('PUT', '/api/admin/settings', {
-        lsp_port: lsp, webdav_port: wd,
+        lsp_port: lsp, web_port: wd,
         device_name: document.getElementById('setDeviceName').value.trim(),
         shared_dir: document.getElementById('setSharedDir').value.trim(),
         auto_browser: document.getElementById('setAutoBrowser').checked,

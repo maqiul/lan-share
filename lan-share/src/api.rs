@@ -2,7 +2,7 @@
 //! 登录/登出 / 用户管理（admin）/ 全局设置 / 用户设置
 
 use crate::db::User;
-use crate::webdav::WebDavState;
+use crate::server::AppState;
 use axum::{
     body::Body,
     extract::{Query, State},
@@ -93,7 +93,7 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// 验证 Bearer token，返回 User（简易模式下 PIN 也放行）
-pub fn auth_user(state: &WebDavState, headers: &HeaderMap) -> Option<User> {
+pub fn auth_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
     let token = extract_token(headers)?;
     let simple_mode = state.db.get_admin_setting("simple_mode")
         .map(|v| v != "false")
@@ -173,7 +173,7 @@ fn validate_password(pwd: &str) -> Result<(), String> {
 // 登录 / 登出
 
 /// GET /api/mode — 获取当前认证模式（无需登录）
-pub async fn get_mode(State(state): State<Arc<WebDavState>>) -> Response {
+pub async fn get_mode(State(state): State<Arc<AppState>>) -> Response {
     let simple_mode = state.db.get_admin_setting("simple_mode")
         .map(|v| v != "false")
         .unwrap_or(true);
@@ -184,7 +184,7 @@ pub async fn get_mode(State(state): State<Arc<WebDavState>>) -> Response {
 }
 
 /// POST /api/login
-pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginReq>) -> Response {
+pub async fn login(State(state): State<Arc<AppState>>, Json(req): Json<LoginReq>) -> Response {
     // 简易模式下只允许管理员登录（用于进入设置界面）
     let simple_mode = state.db.get_admin_setting("simple_mode")
         .map(|v| v != "false")
@@ -228,7 +228,7 @@ pub async fn login(State(state): State<Arc<WebDavState>>, Json(req): Json<LoginR
 }
 
 /// POST /api/logout
-pub async fn logout(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -> Response {
+pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(token) = extract_token(&headers) {
         state.db.logout(&token);
     }
@@ -236,14 +236,14 @@ pub async fn logout(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -
 }
 
 /// GET /api/me — 当前登录用户信息
-pub async fn me(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -> Response {
+pub async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     ok_json(&UserResp::from(user))
 }
 
 /// POST /api/change-password — 修改自己的密码
 pub async fn change_password(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<ChangePasswordReq>,
 ) -> Response {
@@ -263,7 +263,7 @@ pub async fn change_password(
 // 用户管理（admin）
 
 /// GET /api/admin/users
-pub async fn list_users(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -> Response {
+pub async fn list_users(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     require_admin!(user);
     let users: Vec<UserResp> = state.db.list_users().into_iter().map(UserResp::from).collect();
@@ -272,7 +272,7 @@ pub async fn list_users(State(state): State<Arc<WebDavState>>, headers: HeaderMa
 
 /// POST /api/admin/users
 pub async fn create_user(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateUserReq>,
 ) -> Response {
@@ -312,7 +312,7 @@ pub async fn create_user(
 
 /// DELETE /api/admin/users/:id
 pub async fn delete_user(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
 ) -> Response {
@@ -329,7 +329,7 @@ pub async fn delete_user(
 
 /// PUT /api/admin/users/:id
 pub async fn update_user(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
     Json(req): Json<UpdateUserReq>,
@@ -347,7 +347,7 @@ pub async fn update_user(
 
 /// PUT /api/admin/users/:id/password — admin 重置用户密码
 pub async fn reset_user_password(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(user_id): axum::extract::Path<i64>,
     Json(req): Json<ChangePasswordReq>,
@@ -369,7 +369,7 @@ pub async fn reset_user_password(
 // 全局设置（admin）
 
 /// GET /api/admin/settings
-pub async fn get_admin_settings(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -> Response {
+pub async fn get_admin_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     require_admin!(user);
     let settings = state.db.get_all_admin_settings();
@@ -378,7 +378,7 @@ pub async fn get_admin_settings(State(state): State<Arc<WebDavState>>, headers: 
 
 /// PUT /api/admin/settings
 pub async fn set_admin_settings(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Response {
@@ -400,7 +400,7 @@ pub async fn set_admin_settings(
             if let Ok(mut toml_val) = text.parse::<toml::Value>() {
                 if let Some(obj) = req.as_object() {
                     // 只同步 TOML 中已有的字段
-                    let toml_keys = ["shared_dir", "lsp_port", "webdav_port", "device_name", "auto_browser", "pin"];
+                    let toml_keys = ["shared_dir", "lsp_port", "web_port", "device_name", "auto_browser", "pin"];
                     for key in &toml_keys {
                         if let Some(v) = obj.get(*key) {
                             let toml_v = match v {
@@ -431,7 +431,7 @@ pub async fn set_admin_settings(
 // 用户设置（每人一份）
 
 /// GET /api/user/settings
-pub async fn get_user_settings(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -> Response {
+pub async fn get_user_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     let settings = state.db.get_all_user_settings(user.id);
     ok_json(&settings)
@@ -439,7 +439,7 @@ pub async fn get_user_settings(State(state): State<Arc<WebDavState>>, headers: H
 
 /// PUT /api/user/settings
 pub async fn set_user_settings(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Response {
@@ -460,7 +460,7 @@ pub async fn set_user_settings(
 
 /// POST /api/admin/restart
 /// 保存设置后自动重启服务：先回响应，500ms 后起子进程拉起新实例再退出自身
-pub async fn restart_server(State(state): State<Arc<WebDavState>>, headers: HeaderMap) -> Response {
+pub async fn restart_server(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     require_admin!(user);
 
@@ -511,7 +511,7 @@ pub struct ZipQuery {
 /// GET /api/zip?path=/some/dir&token=SESSION_TOKEN
 /// 将目录打包为 zip 流式下载
 pub async fn download_zip(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<ZipQuery>,
 ) -> Response {
     // 认证：query param token
@@ -521,8 +521,8 @@ pub async fn download_zip(
     };
 
     // 解析用户共享目录 + 安全路径
-    let home = crate::webdav::resolve_shared_dir(&state, &user);
-    let dir = match crate::webdav::safe_path(&home, &q.path) {
+    let home = crate::server::resolve_shared_dir(&state, &user);
+    let dir = match crate::server::safe_path(&home, &q.path) {
         Some(p) => p,
         None => return json_resp(StatusCode::FORBIDDEN, r#"{"error":"路径非法"}"#),
     };
@@ -652,7 +652,7 @@ pub struct CreateShareReq {
 
 /// POST /api/share — 创建分享链接
 pub async fn create_share(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<CreateShareReq>,
 ) -> Response {
@@ -664,8 +664,8 @@ pub async fn create_share(
     }
 
     // 验证路径合法性
-    let home = crate::webdav::resolve_shared_dir(&state, &user);
-    if crate::webdav::safe_path(&home, &req.path).is_none() {
+    let home = crate::server::resolve_shared_dir(&state, &user);
+    if crate::server::safe_path(&home, &req.path).is_none() {
         return json_resp(StatusCode::FORBIDDEN, r#"{"error":"路径非法"}"#);
     }
 
@@ -682,7 +682,7 @@ pub async fn create_share(
 
 /// GET /api/shares — 列出当前用户的分享链接
 pub async fn list_shares(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
     let user = require_auth!(&state, &headers);
@@ -699,7 +699,7 @@ pub async fn list_shares(
 
 /// DELETE /api/share/:token — 删除分享链接
 pub async fn delete_share(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
@@ -720,7 +720,7 @@ pub async fn delete_share(
 
 /// GET /s/:token — 访问分享链接（无需登录）
 pub async fn access_share(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
     let Some((user_id, path)) = state.db.verify_share(&token) else {
@@ -739,8 +739,8 @@ pub async fn access_share(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
 
-    let home = crate::webdav::resolve_shared_dir(&state, &user);
-    let Some(full_path) = crate::webdav::safe_path(&home, &path) else {
+    let home = crate::server::resolve_shared_dir(&state, &user);
+    let Some(full_path) = crate::server::safe_path(&home, &path) else {
         return StatusCode::FORBIDDEN.into_response();
     };
 
@@ -828,15 +828,15 @@ pub async fn access_share(
 
 /// GET /api/discover — 发现局域网内的其他 LanShare 服务器
 pub async fn discover_servers(
-    State(_state): State<Arc<WebDavState>>,
+    State(_state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
     let _user = require_auth!(&_state, &headers);
 
     let servers = crate::discovery::discover_servers(2000).await;
     let items: Vec<String> = servers.iter().map(|s| {
-        format!(r#"{{"name":"{}","ip":"{}","webdav_port":{},"lsp_port":{},"version":"{}","url":"{}"}}"#,
-            s.name, s.ip, s.webdav_port, s.lsp_port, s.version, s.url)
+        format!(r#"{{"name":"{}","ip":"{}","web_port":{},"lsp_port":{},"version":"{}","url":"{}"}}"#,
+            s.name, s.ip, s.web_port, s.lsp_port, s.version, s.url)
     }).collect();
 
     json_resp(StatusCode::OK, &format!(r#"{{"servers":[{}]}}"#, items.join(",")))
@@ -844,7 +844,7 @@ pub async fn discover_servers(
 
 /// GET /api/admin/audit-logs — 获取审计日志（admin 专用）
 pub async fn get_audit_logs(
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {

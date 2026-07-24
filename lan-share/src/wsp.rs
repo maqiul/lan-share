@@ -27,7 +27,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::webdav::WebDavState;
+use crate::server::AppState;
 
 // 常量
 
@@ -316,7 +316,7 @@ impl ConnState {
 /// GET /wsp → WebSocket 升级
 pub async fn wsp_upgrade(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<WebDavState>>,
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // 连接数限流
     let count = WSP_CONN_COUNT.load(Ordering::Relaxed);
@@ -330,7 +330,7 @@ pub async fn wsp_upgrade(
       .on_upgrade(move |socket| wsp_connection(socket, state))
 }
 
-async fn wsp_connection(socket: WebSocket, state: Arc<WebDavState>) {
+async fn wsp_connection(socket: WebSocket, state: Arc<AppState>) {
     use futures_util::{SinkExt, StreamExt};
 
     // 连接计数 +1，断开时 -1
@@ -511,7 +511,7 @@ async fn empty_trash(user_home: &std::path::Path) -> Result<u64, String> {
 }
 
 async fn handle_frame(
-    state: &Arc<WebDavState>,
+    state: &Arc<AppState>,
     conn: &Arc<Mutex<ConnState>>,
     frame: WspFrame,
     frame_tx: &mpsc::Sender<Vec<u8>>,
@@ -1098,8 +1098,8 @@ fn op_ack(sid: u32, seq: u32, ok: bool, error: Option<String>) -> WspFrame {
     WspFrame::json(MSG_OP_ACK, sid, seq, &OpAckMsg { ok, error })
 }
 
-/// 解析用户可访问的共享目录（与 webdav.rs 逻辑一致）
-fn resolve_user_dir(state: &WebDavState, user: &crate::db::User) -> PathBuf {
+/// 解析用户可访问的共享目录（与 server.rs 逻辑一致）
+fn resolve_user_dir(state: &AppState, user: &crate::db::User) -> PathBuf {
     let dir = if user.role == "admin" || user.id == 0 {
         state.shared_dir.clone()
     } else if let Some(dir) = &user.shared_dir {

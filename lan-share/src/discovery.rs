@@ -19,8 +19,8 @@ pub struct ServerInfo {
     pub name: String,
     /// 本机 IP
     pub ip: String,
-    /// WebDAV/Web UI 端口
-    pub webdav_port: u16,
+    /// Web UI 端口
+    pub web_port: u16,
     /// LSP 协议端口
     pub lsp_port: u16,
     /// 协议版本
@@ -114,10 +114,10 @@ pub async fn discover_servers(timeout_ms: u64) -> Vec<DiscoveredServer> {
                     results.push(DiscoveredServer {
                         name: info.name,
                         ip: ip.clone(),
-                        webdav_port: info.webdav_port,
+                        web_port: info.web_port,
                         lsp_port: info.lsp_port,
                         version: info.version,
-                        url: format!("http://{}:{}", ip, info.webdav_port),
+                        url: format!("http://{}:{}", ip, info.web_port),
                     });
                 }
             }
@@ -138,7 +138,7 @@ pub async fn discover_servers(timeout_ms: u64) -> Vec<DiscoveredServer> {
 pub struct DiscoveredServer {
     pub name: String,
     pub ip: String,
-    pub webdav_port: u16,
+    pub web_port: u16,
     pub lsp_port: u16,
     pub version: String,
     pub url: String,

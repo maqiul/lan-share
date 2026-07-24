@@ -36,7 +36,8 @@ const DISCOVER_MAGIC: &[u8] = b"LANSHARE_DISCOVER";
 struct DiscoveredServer {
     name: String,
     ip: String,
-    webdav_port: u16,
+    #[serde(alias = "webdav_port")]
+    web_port: u16,
     #[allow(dead_code)]
     lsp_port: u16,
     #[allow(dead_code)]
@@ -48,7 +49,7 @@ struct DiscoveredServer {
 
 impl DiscoveredServer {
     fn addr(&self) -> String {
-        format!("{}:{}", self.ip, self.webdav_port)
+        format!("{}:{}", self.ip, self.web_port)
     }
 }
 
