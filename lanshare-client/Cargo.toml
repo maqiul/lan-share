@@ -3,6 +3,17 @@ name = "lanshare-client"
 version = "0.1.0"
 edition = "2021"
 description = "LanShare WinFsp 客户端 - 将远程共享挂载为本地盘符（只读）"
+autotests = false
+autobins = false
+autolib = false
+
+[lib]
+name = "lanshare_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lanshare-client"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

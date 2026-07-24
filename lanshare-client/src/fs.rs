@@ -25,7 +25,7 @@ use winfsp::filesystem::{
     WideNameInfo,
 };
 
-use crate::wsp_client::{DirEntry, StatResp, WspClient};
+use lanshare_client::wsp_client::{DirEntry, StatResp, WspClient};
 
 /// 将 Unix 时间戳（秒）转为 Windows FILETIME（100ns since 1601）
 fn unix_to_filetime(secs: u64) -> u64 {

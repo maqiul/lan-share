@@ -38,6 +38,17 @@ const MSG_DOWNLOAD_REQ: u8 = 0x30;
 const MSG_DOWNLOAD_DATA: u8 = 0x31;
 const MSG_DOWNLOAD_END: u8 = 0x32;
 
+const MSG_MKDIR: u8 = 0x14;
+const MSG_RENAME: u8 = 0x15;
+const MSG_DELETE: u8 = 0x16;
+#[allow(dead_code)]
+const MSG_OP_ACK: u8 = 0x17;
+const MSG_UPLOAD_START: u8 = 0x20;
+const MSG_UPLOAD_DATA: u8 = 0x21;
+#[allow(dead_code)]
+const MSG_UPLOAD_END: u8 = 0x22;
+const MSG_UPLOAD_ACK: u8 = 0x23;
+
 const MSG_ERROR: u8 = 0xF0;
 
 // ── 消息结构体 ──
@@ -129,6 +140,15 @@ struct WspFrame {
 }
 
 impl WspFrame {
+    fn binary(msg_type: u8, stream_id: u32, seq_num: u32, payload: &[u8]) -> Self {
+        Self {
+            msg_type,
+            stream_id,
+            seq_num,
+            payload: payload.to_vec(),
+        }
+    }
+
     fn json<T: Serialize>(msg_type: u8, stream_id: u32, seq_num: u32, body: &T) -> Self {
         let payload = serde_json::to_vec(body).unwrap_or_default();
         Self { msg_type, stream_id, seq_num, payload }
@@ -269,8 +289,30 @@ impl WspClient {
             let inner = self.inner.lock();
             inner.next_seq.fetch_add(1, Ordering::Relaxed)
         };
-
         let frame = WspFrame::json(msg_type, stream_id, seq, body);
+        self.send_and_recv_frame(frame).await
+    }
+
+    /// 发送二进制负载（不上 JSON）
+    #[allow(dead_code)]
+    async fn send_raw(
+        &self,
+        msg_type: u8,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> Result<WspFrame, String> {
+        let seq = {
+            let inner = self.inner.lock();
+            inner.next_seq.fetch_add(1, Ordering::Relaxed)
+        };
+        let frame = WspFrame::binary(msg_type, stream_id, seq, payload);
+        self.send_and_recv_frame(frame).await
+    }
+
+    /// 发送帧并接收响应（约定响应 = msg_type + 1）
+    async fn send_and_recv_frame(&self, frame: WspFrame) -> Result<WspFrame, String> {
+        let stream_id = frame.stream_id;
+        let msg_type = frame.msg_type;
         let encoded = frame.encode();
 
         // 发送
@@ -309,7 +351,6 @@ impl WspClient {
                     // 不是我们要的响应，继续等
                 }
                 Some(Ok(Message::Close(_))) => {
-                    // 连接关闭，重置
                     let mut inner = self.inner.lock();
                     inner.sink = None;
                     inner.stream = None;
@@ -440,4 +481,131 @@ impl WspClient {
     pub fn download(&self, path: &str, offset: u64) -> Result<Vec<u8>, String> {
         self.rt.block_on(self.download_raw(path, offset))
     }
+
+    // ── 写操作（mount 客户端需要） ──
+
+    /// 创建目录
+    pub fn mkdir(&self, path: &str) -> Result<(), String> {
+        self.rt.block_on(async {
+            self.ensure_connected().await?;
+            self.send_and_recv(MSG_MKDIR, 0, &MkdirMsg { path: path.to_string() }).await?;
+            Ok(())
+        })
+    }
+
+    /// 重命名/移动
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
+        self.rt.block_on(async {
+            self.ensure_connected().await?;
+            self.send_and_recv(MSG_RENAME, 0, &RenameMsg {
+                old_path: old_path.to_string(),
+                new_path: new_path.to_string(),
+            }).await?;
+            Ok(())
+        })
+    }
+
+    /// 删除文件/目录（移到回收站）
+    pub fn delete_file(&self, path: &str) -> Result<(), String> {
+        self.rt.block_on(async {
+            self.ensure_connected().await?;
+            self.send_and_recv(MSG_DELETE, 0, &DeleteMsg { path: path.to_string() }).await?;
+            Ok(())
+        })
+    }
+
+    /// 开始上传（声明文件大小，服务器返回续传 offset）
+    /// returns: server-assigned resume offset (0 = fresh)
+    pub fn upload_start(&self, path: &str, size: u64) -> Result<u64, String> {
+        self.rt.block_on(async {
+            self.ensure_connected().await?;
+            let resp = self.send_and_recv(MSG_UPLOAD_START, 0, &UploadStartMsg {
+                path: path.to_string(),
+                size,
+            }).await?;
+            let ack: UploadAckMsg = resp.json_body()
+                .map_err(|e| format!("上传开始响应解析失败: {}", e))?;
+            if !ack.ok {
+                return Err(format!("上传开始失败: {}", ack.error.unwrap_or_default()));
+            }
+            Ok(ack.offset)
+        })
+    }
+
+    /// 上传一段数据（从 offset 开始）
+    /// 服务端会回 MSG_UPLOAD_ACK(0x23) — 我们读一帧消化掉，避免污染下一次请求的响应。
+    pub fn upload_data(&self, _path: &str, offset: u64, data: &[u8]) -> Result<(), String> {
+        self.rt.block_on(async {
+            self.ensure_connected().await?;
+            let seq = {
+                let inner = self.inner.lock();
+                inner.next_seq.fetch_add(1, Ordering::Relaxed)
+            };
+            let mut payload = Vec::with_capacity(8 + data.len());
+            payload.extend_from_slice(&offset.to_be_bytes());
+            payload.extend_from_slice(data);
+            let frame = WspFrame::binary(MSG_UPLOAD_DATA, 0, seq, &payload);
+            let encoded = frame.encode();
+
+            // 发送
+            {
+                let mut inner = self.inner.lock();
+                if let Some(sink) = inner.sink.as_mut() {
+                    sink.send(Message::Binary(encoded.into()))
+                        .await
+                        .map_err(|e| format!("上传发送失败: {}", e))?;
+                } else {
+                    return Err("未连接".into());
+                }
+            }
+
+            // 读一帧（必须是 MSG_UPLOAD_ACK）
+            let msg = {
+                let mut inner = self.inner.lock();
+                if let Some(stream) = inner.stream.as_mut() {
+                    stream.next().await
+                } else {
+                    return Err("连接已断开".into());
+                }
+            };
+            match msg {
+                Some(Ok(Message::Binary(data))) => {
+                    let resp = WspFrame::decode(&data)?;
+                    if resp.msg_type != MSG_UPLOAD_ACK {
+                        return Err(format!("上传期望 ACK (0x23)，收到 0x{:02x}", resp.msg_type));
+                    }
+                    Ok(())
+                }
+                _ => Err("上传 ACK 接收失败".into()),
+            }
+        })
+    }
+}
+
+// ── 写操作消息结构 ──
+
+#[derive(Serialize, Deserialize)]
+struct MkdirMsg { path: String }
+
+#[derive(Serialize, Deserialize)]
+struct RenameMsg {
+    old_path: String,
+    new_path: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DeleteMsg { path: String }
+
+#[derive(Serialize, Deserialize)]
+struct UploadStartMsg {
+    path: String,
+    size: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UploadAckMsg {
+    ok: bool,
+    offset: u64,
+    #[allow(dead_code)]
+    error: Option<String>,
 }

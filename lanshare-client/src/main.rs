@@ -7,7 +7,6 @@
 //! 依赖：WinFsp 2.x（https://winfsp.dev）
 
 mod fs;
-mod wsp_client;
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
@@ -23,7 +22,7 @@ use winfsp::winfsp_init_or_die;
 use winfsp::FspError;
 
 use fs::LanShareFs;
-use wsp_client::WspClient;
+use lanshare_client::WspClient;
 
 // ══════════════════════════════════════════════════════════
 //  发现协议（同步 UDP，与服务端 discovery.rs 对应）
@@ -442,6 +441,19 @@ fn show_message_box(text: &str, title: &str, _flags: u32) {
     eprintln!("[{}] {}", title, text);
 }
 
+/// 隐藏控制台窗口，让程序在后台运行
+#[cfg(windows)]
+fn hide_console() {
+    use windows::Win32::System::Console::GetConsoleWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_invalid() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════
 //  CLI 参数
 // ══════════════════════════════════════════════════════════
@@ -774,9 +786,14 @@ fn svc_start(
     println!("  ╔══════════════════════════════════════════╗");
     println!("  ║  ✅ 挂载成功！                           ║");
     println!("  ║  在资源管理器中查看盘符                  ║");
-    println!("  ║  关闭本窗口即可卸载                      ║");
+    println!("  ║  窗口即将隐藏，程序在后台运行            ║");
+    println!("  ║  结束进程即可卸载                        ║");
     println!("  ╚══════════════════════════════════════════╝");
     println!();
+
+    // 挂载成功后隐藏控制台，后台运行
+    #[cfg(windows)]
+    hide_console();
 
     Ok(LanShareFsHost { host })
 }

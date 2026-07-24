@@ -41,6 +41,7 @@ pub type LPWSTR = *mut u16;
 pub type LPVOID = *mut std::ffi::c_void;
 pub type LPCVOID = *const std::ffi::c_void;
 pub type LPDWORD = *mut DWORD;
+pub type PULONG = *mut ULONG;
 pub type LONGLONG = i64;
 pub type ULONG = u32;
 pub type USHORT = u16;
