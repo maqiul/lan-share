@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use winfsp::host::{DebugMode, FileSystemHost, FileSystemParams, VolumeParams};
+use winfsp::host::{DebugMode, FileSystemHost, FileSystemParams, MountPoint, VolumeParams};
 use winfsp::service::FileSystemServiceBuilder;
 use winfsp::winfsp_init_or_die;
 use winfsp::FspError;
@@ -623,6 +623,16 @@ fn main() {
         }
     }
 
+    // 确保 WinFsp DLL 可被 delayload 找到
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::LibraryLoader::SetDllDirectoryW;
+        use windows::core::w;
+        unsafe {
+            let _ = SetDllDirectoryW(w!("C:\\Program Files (x86)\\WinFsp\\bin"));
+        }
+    }
+
     let args = Args::parse();
 
     // 解析配置（CLI > 配置文件 > 交互发现）
@@ -727,9 +737,6 @@ fn svc_start(
         .read_only_volume(true)
         .allow_open_in_kernel_mode(true);
 
-    if mount != "*" && !mount.is_empty() {
-        volume_params.prefix(mount);
-    }
     volume_params.filesystem_name(label);
 
     let fs_params = FileSystemParams {
@@ -743,8 +750,18 @@ fn svc_start(
             FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
         })?;
 
-    if mount != "*" && !mount.is_empty() {
-        host.mount(mount).map_err(|_| {
+    // 规范化盘符："L" → "L:"，"*" → NextFreeDrive 自动分配
+    if mount == "*" || mount.is_empty() {
+        host.mount(MountPoint::NextFreeDrive).map_err(|_| {
+            FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
+        })?;
+    } else {
+        let drive = if mount.len() == 1 && mount.chars().next().unwrap().is_ascii_alphabetic() {
+            format!("{}:", mount)
+        } else {
+            mount.to_string()
+        };
+        host.mount(drive.as_str()).map_err(|_| {
             FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
         })?;
     }
