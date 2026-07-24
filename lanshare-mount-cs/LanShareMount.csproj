@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- XP SP3 minimum .NET Framework -->
+    <TargetFramework>net40</TargetFramework>
+    <RootNamespace>LanShareMount</RootNamespace>
+    <AssemblyName>lanshare-mount</AssemblyName>
+    <OutputType>Exe</OutputType>
+    <LangVersion>7.3</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Prefer32Bit>false</Prefer32Bit>
+    <NoWarn>CS0618;CS1591;NU1701</NoWarn>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AssemblyTitle>LanShare Mount</AssemblyTitle>
+    <AssemblyDescription>XP-compatible Dokan mount client for LanShare (P/Invoke dokan.dll 0.6.0)</AssemblyDescription>
+    <Product>LanShare Mount</Product>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Net" />
+    <Reference Include="System.Web.Extensions" />
+    <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+</Project>
