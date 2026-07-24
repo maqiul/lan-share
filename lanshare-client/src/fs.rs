@@ -63,18 +63,30 @@ struct DirCacheEntry {
     cached_at: u64,
 }
 
+/// 文件缓存条目（带 LRU 访问时间戳）
+struct FileCacheEntry {
+    data: Vec<u8>,
+    last_access: std::sync::atomic::AtomicU64,
+}
+
 /// LanShare 只读文件系统上下文
 pub struct LanShareFs {
     client: Arc<WspClient>,
     /// 目录缓存：路径 → 条目列表（TTL 5 秒）
     dir_cache: RwLock<HashMap<String, DirCacheEntry>>,
-    /// 文件内容缓存：路径 → (offset, data)
-    file_cache: RwLock<HashMap<String, Vec<u8>>>,
+    /// 文件内容缓存：路径 → 数据（LRU 淘汰）
+    file_cache: RwLock<HashMap<String, FileCacheEntry>>,
     /// 下一个 index_number
     next_index: std::sync::atomic::AtomicU64,
+    /// 缓存访问序号（用于 LRU）
+    cache_seq: std::sync::atomic::AtomicU64,
 }
 
 const DIR_CACHE_TTL_SECS: u64 = 5;
+/// 文件缓存总容量上限（64 MB）
+const FILE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// 单个文件超过此大小则不缓存（16 MB），避免大文件撑爆内存
+const FILE_CACHE_MAX_FILE: usize = 16 * 1024 * 1024;
 
 impl LanShareFs {
     pub fn new(client: Arc<WspClient>) -> Self {
@@ -83,11 +95,16 @@ impl LanShareFs {
             dir_cache: RwLock::new(HashMap::new()),
             file_cache: RwLock::new(HashMap::new()),
             next_index: std::sync::atomic::AtomicU64::new(1),
+            cache_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     fn next_index_number(&self) -> u64 {
         self.next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn next_cache_seq(&self) -> u64 {
+        self.cache_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 将 WinFsp 路径（U16CStr，反斜杠分隔）转为 WSP 路径（正斜杠）
@@ -141,9 +158,10 @@ impl LanShareFs {
         // 远程获取
         let entries = self.client.list_dir(path)?;
 
-        // 更新缓存
+        // 更新缓存（顺便清理过期条目，防止只增不减）
         {
             let mut cache = self.dir_cache.write();
+            cache.retain(|_, e| now - e.cached_at < DIR_CACHE_TTL_SECS);
             cache.insert(path.to_string(), DirCacheEntry {
                 entries: entries.clone(),
                 cached_at: now,
@@ -153,15 +171,16 @@ impl LanShareFs {
         Ok(entries)
     }
 
-    /// 带缓存的文件下载（整文件缓存，适合小文件；大文件按需读取）
+    /// 带缓存的文件下载（整文件缓存 + LRU 淘汰；超大文件不缓存）
     fn read_file_cached(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-        // 先检查缓存
+        // 先检查缓存（命中时更新 LRU 时间戳）
         {
             let cache = self.file_cache.read();
-            if let Some(data) = cache.get(path) {
-                if (offset as usize) < data.len() {
-                    let end = ((offset as usize) + len).min(data.len());
-                    return Ok(data[offset as usize..end].to_vec());
+            if let Some(entry) = cache.get(path) {
+                entry.last_access.store(self.next_cache_seq(), std::sync::atomic::Ordering::Relaxed);
+                if (offset as usize) < entry.data.len() {
+                    let end = ((offset as usize) + len).min(entry.data.len());
+                    return Ok(entry.data[offset as usize..end].to_vec());
                 }
             }
         }
@@ -169,14 +188,29 @@ impl LanShareFs {
         // 下载整个文件（从 offset 0 开始，简化实现）
         let data = self.client.download(path, 0)?;
 
-        // 缓存
-        {
+        // 只缓存不超过单文件上限的，避免大文件撑爆内存
+        if data.len() <= FILE_CACHE_MAX_FILE {
             let mut cache = self.file_cache.write();
-            // 限制缓存大小：最多缓存 100 个文件
-            if cache.len() >= 100 {
-                cache.clear();
+            // LRU 淘汰：总容量超限时移除最久未访问的条目
+            let mut total: usize = cache.values().map(|e| e.data.len()).sum();
+            while total + data.len() > FILE_CACHE_MAX_BYTES && !cache.is_empty() {
+                let oldest = cache
+                    .iter()
+                    .min_by_key(|(_, e)| e.last_access.load(std::sync::atomic::Ordering::Relaxed))
+                    .map(|(k, _)| k.clone());
+                match oldest {
+                    Some(key) => {
+                        if let Some(removed) = cache.remove(&key) {
+                            total -= removed.data.len();
+                        }
+                    }
+                    None => break,
+                }
             }
-            cache.insert(path.to_string(), data.clone());
+            cache.insert(path.to_string(), FileCacheEntry {
+                data: data.clone(),
+                last_access: std::sync::atomic::AtomicU64::new(self.next_cache_seq()),
+            });
         }
 
         if (offset as usize) < data.len() {

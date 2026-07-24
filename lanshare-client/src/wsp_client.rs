@@ -278,6 +278,39 @@ impl WspClient {
         Ok(())
     }
 
+    /// 判断是否为连接类错误（值得重连重试）
+    fn is_transient_error(e: &str) -> bool {
+        const KEYWORDS: &[&str] = &[
+            "未连接", "连接已断开", "连接已关闭", "连接断开",
+            "发送失败", "接收错误", "WebSocket 连接失败",
+            "发送下载请求失败", "下载接收错误", "上传发送失败",
+        ];
+        KEYWORDS.iter().any(|k| e.contains(k))
+    }
+
+    /// 强制断开连接（下次 ensure_connected 会重连）
+    fn force_disconnect(&self) {
+        let mut inner = self.inner.lock();
+        inner.sink = None;
+        inner.stream = None;
+    }
+
+    /// 包裹一个操作：连接类错误时自动重连并重试一次
+    async fn with_retry<F, Fut, T>(&self, mut op: F) -> Result<T, String>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        match op().await {
+            Ok(v) => Ok(v),
+            Err(e) if Self::is_transient_error(&e) => {
+                self.force_disconnect();
+                op().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// 发送帧并等待指定类型的响应
     async fn send_and_recv<T: Serialize>(
         &self,
@@ -455,7 +488,7 @@ impl WspClient {
 
     /// 列出目录
     pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>, String> {
-        self.rt.block_on(async {
+        self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
             let resp = self.send_and_recv(MSG_LIST_DIR, 0, &ListDirMsg {
                 path: path.to_string(),
@@ -463,61 +496,61 @@ impl WspClient {
             let body: ListDirRespMsg = resp.json_body()
                 .map_err(|e| format!("列目录响应解析失败: {}", e))?;
             Ok(body.entries)
-        })
+        }))
     }
 
     /// 获取文件/目录元信息
     pub fn stat(&self, path: &str) -> Result<StatResp, String> {
-        self.rt.block_on(async {
+        self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
             let resp = self.send_and_recv(MSG_STAT, 0, &StatMsg {
                 path: path.to_string(),
             }).await?;
             resp.json_body().map_err(|e| format!("STAT 响应解析失败: {}", e))
-        })
+        }))
     }
 
     /// 下载文件（从 offset 开始）
     pub fn download(&self, path: &str, offset: u64) -> Result<Vec<u8>, String> {
-        self.rt.block_on(self.download_raw(path, offset))
+        self.rt.block_on(self.with_retry(|| self.download_raw(path, offset)))
     }
 
     // ── 写操作（mount 客户端需要） ──
 
     /// 创建目录
     pub fn mkdir(&self, path: &str) -> Result<(), String> {
-        self.rt.block_on(async {
+        self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
             self.send_and_recv(MSG_MKDIR, 0, &MkdirMsg { path: path.to_string() }).await?;
             Ok(())
-        })
+        }))
     }
 
     /// 重命名/移动
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
-        self.rt.block_on(async {
+        self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
             self.send_and_recv(MSG_RENAME, 0, &RenameMsg {
                 old_path: old_path.to_string(),
                 new_path: new_path.to_string(),
             }).await?;
             Ok(())
-        })
+        }))
     }
 
     /// 删除文件/目录（移到回收站）
     pub fn delete_file(&self, path: &str) -> Result<(), String> {
-        self.rt.block_on(async {
+        self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
             self.send_and_recv(MSG_DELETE, 0, &DeleteMsg { path: path.to_string() }).await?;
             Ok(())
-        })
+        }))
     }
 
     /// 开始上传（声明文件大小，服务器返回续传 offset）
     /// returns: server-assigned resume offset (0 = fresh)
     pub fn upload_start(&self, path: &str, size: u64) -> Result<u64, String> {
-        self.rt.block_on(async {
+        self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
             let resp = self.send_and_recv(MSG_UPLOAD_START, 0, &UploadStartMsg {
                 path: path.to_string(),
@@ -529,7 +562,7 @@ impl WspClient {
                 return Err(format!("上传开始失败: {}", ack.error.unwrap_or_default()));
             }
             Ok(ack.offset)
-        })
+        }))
     }
 
     /// 上传一段数据（从 offset 开始）

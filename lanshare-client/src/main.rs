@@ -450,6 +450,51 @@ fn hide_console() {
     }
 }
 
+// ══════════════════════════════════════════════
+//  日志（写入 exe 同目录 lanshare-client.log，FreeConsole 后仍可排查）
+// ══════════════════════════════════════════════
+
+fn log_file_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("lanshare-client.log")))
+}
+
+/// 将 UNIX 秒格式化为 "YYYY-MM-DD HH:MM:SS"（UTC）
+fn format_unix_utc(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // civil_from_days（Howard Hinnant 算法）
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let mut y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, mi, s)
+}
+
+/// 追加一条日志（带时间戳）
+fn log(msg: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Some(path) = log_file_path() {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            use std::io::Write;
+            let _ = writeln!(f, "[{}] {}", format_unix_utc(ts), msg);
+        }
+    }
+}
+
 // ══════════════════════════════════════════════════════════
 //  CLI 参数
 // ══════════════════════════════════════════════════════════
@@ -672,16 +717,21 @@ fn main() {
 
     let args = Args::parse();
 
+    log("═══ LanShare 客户端启动 ═══");
+
     // 解析配置（CLI > 配置文件 > 交互发现）
     let cfg = match ResolvedConfig::resolve(args) {
         Ok(c) => c,
         Err(msg) => {
+            log(&format!("配置解析失败: {}", msg));
             eprintln!("\n  ❌ {}", msg);
             show_message_box(&msg, "LanShare 客户端", 0x10);
             pause_exit();
             return;
         }
     };
+
+    log(&format!("目标服务器: {}", cfg.server));
 
     if !cfg.has_auth() {
         let msg = "错误：没有认证信息（PIN / 账号密码 / Token）";
@@ -700,6 +750,7 @@ fn main() {
         match http_login(&cfg.server, username, password) {
             Ok(t) => t,
             Err(e) => {
+                log(&format!("登录失败: {}", e));
                 eprintln!("\n  ❌ {}", e);
                 show_message_box(&e, "LanShare 客户端 - 登录失败", 0x10);
                 pause_exit();
@@ -751,11 +802,13 @@ fn svc_start(
     println!("  🌐 连接 {} ...", server);
     let client = WspClient::connect(server, token).map_err(|e| {
         let msg = format!("WSP 连接失败: {}", e);
+        log(&msg);
         eprintln!("\n  ❌ {}", msg);
         show_message_box(&msg, "LanShare 客户端 - 连接失败", 0x10);
         FspError::NTSTATUS(windows::Win32::Foundation::STATUS_CONNECTION_REFUSED.0)
     })?;
 
+    log(&format!("连接成功: {}", server));
     println!("  ✅ 认证成功，挂载中...");
 
     let context = LanShareFs::new(Arc::new(client));
@@ -815,6 +868,8 @@ fn svc_start(
     println!("  ╚══════════════════════════════════════════╝");
     println!();
 
+    log("挂载成功，进入后台运行");
+
     // 挂载成功后延迟关闭控制台，后台运行
     #[cfg(windows)]
     {
@@ -828,6 +883,7 @@ fn svc_start(
 fn svc_stop(fs: Option<&mut LanShareFsHost>) {
     if let Some(host) = fs {
         host.host.stop();
+        log("已卸载盘符，服务停止");
         println!("  🔌 已卸载");
     }
 }
