@@ -114,7 +114,12 @@ async fn serve_ui(State(state): State<Arc<WebDavState>>) -> Response {
         .replace("{{LSP_PORT}}", &state.lsp_port.to_string())
         .replace("{{SHARED_DIR}}", &state.shared_dir.display().to_string())
         .replace("{{START_TS}}", &state.start_ts.to_string());
-    Html(html).into_response()
+    let mut resp = Html(html).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    resp
 }
 
 /// 根路径统一入口：GET 返回 Web UI，其余方法走 WebDAV 协议

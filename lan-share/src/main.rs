@@ -120,6 +120,40 @@ fn resolve_shared_dir(raw: &str) -> PathBuf {
     }
 }
 
+/// 预检测 TCP 端口是否可用（bind 成功立即 drop）
+async fn check_tcp_port(port: u16) -> Result<(), String> {
+    let addr = format!("0.0.0.0:{}", port);
+    match tokio::net::TcpListener::bind(&addr).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("TCP 端口 {} 已被占用，无法启动服务。\n请关闭占用该端口的程序，或在 lanshare.toml 中更换端口。\n\n详细错误: {}", port, e)),
+    }
+}
+
+/// 预检测 UDP 端口是否可用
+async fn check_udp_port(port: u16) -> Result<(), String> {
+    let addr = format!("0.0.0.0:{}", port);
+    match tokio::net::UdpSocket::bind(&addr).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("UDP 端口 {} 已被占用，无法启动 LSP 服务。\n请关闭占用该端口的程序，或在 lanshare.toml 中更换端口。\n\n详细错误: {}", port, e)),
+    }
+}
+
+/// 弹出错误对话框（Windows）或打印到 stderr
+fn show_fatal_error(msg: &str) {
+    eprintln!("\n❌ LanShare 启动失败\n{}\n", msg);
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        let msg_w: Vec<u16> = OsStr::new(msg).encode_wide().chain(std::iter::once(0)).collect();
+        let title_w: Vec<u16> = OsStr::new("LanShare 启动失败").encode_wide().chain(std::iter::once(0)).collect();
+        unsafe {
+            MessageBoxW(0, msg_w.as_ptr(), title_w.as_ptr(), MB_OK | MB_ICONERROR);
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "lan-share", about = "LanShare v3.0 - 基于 LSP3 协议的局域网文件共享", version)]
 struct Cli {
@@ -318,6 +352,18 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
             info!("简易模式已关闭，请使用账号密码登录");
             info!("--- 映射网络驱动器 ---");
             info!("  net use Z: \\\\{}@{}\\DavWWWRoot /user:用户名 密码", local_ip, webdav_port);
+        }
+    }
+
+    // ── 端口预检测：失败则弹窗提示，不闪退 ──
+    if let Err(msg) = check_udp_port(port).await {
+        show_fatal_error(&msg);
+        return Err(msg.into());
+    }
+    if webdav_port > 0 {
+        if let Err(msg) = check_tcp_port(webdav_port).await {
+            show_fatal_error(&msg);
+            return Err(msg.into());
         }
     }
 
