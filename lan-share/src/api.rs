@@ -844,9 +844,9 @@ pub async fn get_audit_logs(
         let path = l.path.as_ref().map(|p| format!(r#","path":"{}""#, p.replace('"', "\\\""))).unwrap_or_default();
         let detail = l.detail.as_ref().map(|d| format!(r#","detail":"{}""#, d.replace('"', "\\\""))).unwrap_or_default();
         let ip = l.ip.as_ref().map(|i| format!(r#","ip":"{}""#, i)).unwrap_or_default();
-        let username = l.username.as_ref().map(|u| format!(r#""username":"{}""#, u)).unwrap_or_else(|| r#""username":null"#.to_string());
-        format!(r#"{{"id":{},"user_id":{:?},"action":"{}"{}{}{},"created_at":"{}"}}"#,
-            l.id, l.user_id, l.action, path, detail, ip, l.created_at)
+        let username = l.username.as_ref().map(|u| format!(r#""{}""#, u.replace('"', "\\\""))).unwrap_or_else(|| "null".to_string());
+        format!(r#"{{"id":{},"user_id":{:?},"username":{},"action":"{}"{}{}{},"created_at":"{}"}}"#,
+            l.id, l.user_id, username, l.action, path, detail, ip, l.created_at)
     }).collect();
 
     json_resp(StatusCode::OK, &format!(r#"{{"logs":[{}]}}"#, items.join(",")))

@@ -20,6 +20,7 @@ pub struct User {
     pub quota_mb: i64,
 }
 
+#[allow(dead_code)]
 impl User {
     /// 检查是否有某项权限（admin 拥有全部权限）
     pub fn can(&self, perm: &str) -> bool {
