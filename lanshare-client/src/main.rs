@@ -1,14 +1,17 @@
 //! LanShare Client — 将远程 LanShare 共享挂载为本地盘符（只读）
 //!
 //! 用法：
-//!   lanshare-client --server 192.168.1.100:8080 --pin 123456 --mount L:
-//!   lanshare-client --server 192.168.1.100:8080 --token <session_token> --mount *
+//!   简易模式：lanshare-client --server 192.168.1.100:8080 --pin 123456 --mount L:
+//!   账号模式：lanshare-client --server 192.168.1.100:8080 -u admin -p 123456 --mount L:
+//!   Token：  lanshare-client --server 192.168.1.100:8080 --token <session_token> --mount *
 //!
 //! 依赖：WinFsp 2.x（https://winfsp.dev）
 
 mod fs;
 mod wsp_client;
 
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -31,7 +34,15 @@ struct Args {
     #[arg(short, long)]
     pin: Option<String>,
 
-    /// 账号模式 session token
+    /// 账号模式用户名
+    #[arg(short = 'u', long)]
+    username: Option<String>,
+
+    /// 账号模式密码
+    #[arg(short = 'p', long)]
+    password: Option<String>,
+
+    /// 账号模式 session token（直接传入，跳过登录）
     #[arg(short, long)]
     token: Option<String>,
 
@@ -63,14 +74,88 @@ fn main() {
     let _ = fsp.join();
 }
 
+/// 通过 HTTP API 登录，获取 session token
+fn http_login(server: &str, username: &str, password: &str) -> Result<String, String> {
+    let body = serde_json::json!({
+        "username": username,
+        "password": password,
+    });
+    let body_str = body.to_string();
+
+    let request = format!(
+        "POST /api/login HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        server,
+        body_str.len(),
+        body_str
+    );
+
+    let mut stream = TcpStream::connect(server)
+        .map_err(|e| format!("连接 {} 失败: {}", server, e))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
+    stream.write_all(request.as_bytes())
+        .map_err(|e| format!("发送登录请求失败: {}", e))?;
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)
+        .map_err(|e| format!("读取登录响应失败: {}", e))?;
+
+    // 解析 HTTP 响应：跳过 headers，取 body
+    let body_part = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or("");
+
+    // 检查 HTTP 状态码
+    let status_ok = response
+        .lines()
+        .next()
+        .map(|l| l.contains("200"))
+        .unwrap_or(false);
+
+    if !status_ok {
+        // 尝试从 body 提取错误信息
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_part) {
+            if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
+                return Err(format!("登录失败: {}", err));
+            }
+        }
+        return Err(format!("登录失败: HTTP 响应异常"));
+    }
+
+    // 解析 token
+    let json: serde_json::Value = serde_json::from_str(body_part)
+        .map_err(|e| format!("解析登录响应失败: {}", e))?;
+    json.get("token")
+        .and_then(|t| t.as_str())
+        .map(|t| t.to_string())
+        .ok_or_else(|| "登录响应中无 token".to_string())
+}
+
 fn svc_start(args: Args) -> Result<LanShareFsHost, FspError> {
-    // 确定认证 token
+    // 确定认证 token：PIN > 用户名密码登录 > 直接 token
     let token = if let Some(pin) = &args.pin {
+        println!("使用 PIN 码认证（简易模式）");
         pin.clone()
+    } else if let (Some(username), Some(password)) = (&args.username, &args.password) {
+        println!("使用账号 {} 登录（账号模式）...", username);
+        http_login(&args.server, username, password).map_err(|e| {
+            eprintln!("{}", e);
+            FspError::NTSTATUS(0xC000_006Du32 as i32) // STATUS_LOGON_FAILURE
+        })?
     } else if let Some(token) = &args.token {
+        println!("使用 session token 认证");
         token.clone()
     } else {
-        eprintln!("错误：需要 --pin 或 --token 参数");
+        eprintln!("错误：需要 --pin、--username + --password、或 --token 参数");
+        eprintln!("  简易模式：--pin <PIN码>");
+        eprintln!("  账号模式：-u <用户名> -p <密码>");
+        eprintln!("  Token：  --token <session_token>");
         return Err(FspError::NTSTATUS(
             windows::Win32::Foundation::STATUS_INVALID_PARAMETER.0,
         ));
@@ -78,7 +163,7 @@ fn svc_start(args: Args) -> Result<LanShareFsHost, FspError> {
 
     println!("连接 LanShare 服务端 {} ...", args.server);
     let client = WspClient::connect(&args.server, &token).map_err(|e| {
-        eprintln!("连接失败: {}", e);
+        eprintln!("WSP 连接失败: {}", e);
         FspError::NTSTATUS(windows::Win32::Foundation::STATUS_CONNECTION_REFUSED.0)
     })?;
     println!("认证成功，挂载为 {} ...", args.mount);
@@ -103,7 +188,7 @@ fn svc_start(args: Args) -> Result<LanShareFsHost, FspError> {
     if args.mount != "*" && !args.mount.is_empty() {
         volume_params.prefix(&args.mount);
     }
-    volume_params.filesystem_name("LanShare");
+    volume_params.filesystem_name(&args.label);
 
     let fs_params = FileSystemParams {
         use_dir_info_by_name: false,
