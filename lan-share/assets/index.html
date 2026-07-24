@@ -544,8 +544,8 @@ main{flex:1;display:flex;min-height:0}
         </select>
       </label>
     </div>
-    <!-- 所有人: 改密码 -->
-    <div class="setgroup">
+    <!-- 所有人: 改密码（简易模式下隐藏） -->
+    <div class="setgroup" id="changePwdGroup">
       <h5 data-i18n="changePassword">🔑 修改密码</h5>
       <label class="setitem">
         <span class="setlabel" data-i18n="newPwdLabel">新密码</span>
@@ -1965,9 +1965,10 @@ function openSettings(){
   const isAdmin = USER && USER.role === 'admin';
   const simpleMode = document.getElementById('setSimpleMode').checked;
   document.getElementById('adminSettingsGroup').style.display = isAdmin ? '' : 'none';
-  // 简易模式下隐藏用户管理和审计日志
+  // 简易模式下隐藏用户管理、审计日志和修改密码
   document.getElementById('userMgmtGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
   document.getElementById('auditLogGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
+  document.getElementById('changePwdGroup').style.display = simpleMode ? 'none' : '';
   loadSettings();
   if(isAdmin && !simpleMode) loadAuditLogs();
 }
@@ -1982,10 +1983,11 @@ function togglePinVisible(){
 function updatePinRowVisibility(){
   const simpleMode = document.getElementById('setSimpleMode').checked;
   document.getElementById('pinSettingRow').style.display = simpleMode ? '' : 'none';
-  // 简易模式下隐藏用户管理和审计日志
+  // 简易模式下隐藏用户管理、审计日志和修改密码
   const isAdmin = USER && USER.role === 'admin';
   document.getElementById('userMgmtGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
   document.getElementById('auditLogGroup').style.display = (isAdmin && !simpleMode) ? '' : 'none';
+  document.getElementById('changePwdGroup').style.display = simpleMode ? 'none' : '';
 }
 document.getElementById('setSimpleMode').onchange = updatePinRowVisibility;
 document.getElementById('btnSettings').onclick = openSettings;
