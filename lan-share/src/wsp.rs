@@ -54,6 +54,8 @@ pub const MSG_AUTH_ACK: u8 = 0x04;
 
 pub const MSG_LIST_DIR: u8 = 0x10;
 pub const MSG_LIST_DIR_RESP: u8 = 0x11;
+pub const MSG_STAT: u8 = 0x12;
+pub const MSG_STAT_RESP: u8 = 0x13;
 pub const MSG_MKDIR: u8 = 0x14;
 pub const MSG_RENAME: u8 = 0x15;
 pub const MSG_DELETE: u8 = 0x16;
@@ -191,6 +193,20 @@ pub struct DirEntryMsg {
 pub struct ListDirRespMsg {
     pub path: String,
     pub entries: Vec<DirEntryMsg>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StatMsg {
+    pub path: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StatRespMsg {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub mtime: String,
+    pub exists: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -593,6 +609,48 @@ async fn handle_frame(
                     path: msg.path, entries,
                 }).encode()).await; }
                 Err(e) => { let _ = frame_tx.send(error_frame(sid, c.next_seq(), 500, &e).encode()).await; }
+            }
+        }
+
+        // 获取文件/目录元信息
+        MSG_STAT => {
+            let msg: StatMsg = match frame.json_body() {
+                Ok(m) => m,
+                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+            };
+            let home = user_home.unwrap();
+            let Some(target) = safe_join(&home, &msg.path) else {
+                let mut c = conn.lock().await;
+                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                return;
+            };
+            let result = tokio::fs::metadata(&target).await;
+            let mut c = conn.lock().await;
+            match result {
+                Ok(meta) => {
+                    let name = target.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let mtime = meta.modified()
+                        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                        .unwrap_or(0);
+                    let _ = frame_tx.send(WspFrame::json(MSG_STAT_RESP, sid, c.next_seq(), &StatRespMsg {
+                        name,
+                        is_dir: meta.is_dir(),
+                        size: meta.len(),
+                        mtime: mtime.to_string(),
+                        exists: true,
+                    }).encode()).await;
+                }
+                Err(_) => {
+                    let _ = frame_tx.send(WspFrame::json(MSG_STAT_RESP, sid, c.next_seq(), &StatRespMsg {
+                        name: String::new(),
+                        is_dir: false,
+                        size: 0,
+                        mtime: "0".to_string(),
+                        exists: false,
+                    }).encode()).await;
+                }
             }
         }
 

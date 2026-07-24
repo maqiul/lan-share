@@ -2,6 +2,8 @@
 /dist
 *.zip
 *.exe
+*.msi
+*.7z
 dl_test.bin
 /test_shared
 /shared
