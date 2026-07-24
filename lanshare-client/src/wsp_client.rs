@@ -2,7 +2,8 @@
 //!
 //! 提供同步接口（内部用 tokio runtime 桥接），供 WinFsp 回调使用。
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -10,6 +11,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -204,18 +206,67 @@ type WsStream = futures_util::stream::SplitStream<
 >;
 
 /// WSP 客户端 — 同步接口，内部桥接 tokio
+///
+/// 并发模型：单 WebSocket 连接 + 后台读取线程按 stream_id 分发帧，
+/// 多个请求可同时 in-flight（WinFsp 多线程回调不再串行等待）。
 pub struct WspClient {
     rt: Runtime,
-    inner: Arc<Mutex<InnerClient>>,
+    inner: Arc<InnerClient>,
     server_addr: String,
     token: String,
 }
 
 struct InnerClient {
-    sink: Option<WsSink>,
-    stream: Option<WsStream>,
+    /// 发送端（None = 未连接）；tokio Mutex，仅在发送时短暂持有
+    sink: tokio::sync::Mutex<Option<WsSink>>,
+    /// 在途请求：stream_id → 帧发送端，读取线程按 stream_id 转发响应
+    pending: Mutex<HashMap<u32, tokio::sync::mpsc::UnboundedSender<WspFrame>>>,
+    /// 串行化建连，防止并发重复连接
+    connect_lock: tokio::sync::Mutex<()>,
+    /// 连接代号：每次建连递增，过期读取线程不得覆盖新连接
+    epoch: AtomicU32,
+    connected: AtomicBool,
     next_seq: AtomicU32,
     next_stream: AtomicU32,
+}
+
+impl InnerClient {
+    /// 标记断开：清空发送端并通知所有在途请求（发送端 drop → 接收端得 None）
+    async fn mark_disconnected(&self) {
+        *self.sink.lock().await = None;
+        self.connected.store(false, Ordering::Release);
+        self.pending.lock().clear();
+    }
+}
+
+/// 后台读取循环：独占接收端，按 stream_id 将帧分发给对应的等待者
+async fn reader_loop(inner: Arc<InnerClient>, mut stream: WsStream, epoch: u32) {
+    while let Some(msg) = stream.next().await {
+        // 连接已被取代（重连后），停止分发
+        if inner.epoch.load(Ordering::Acquire) != epoch {
+            break;
+        }
+        match msg {
+            Ok(Message::Binary(data)) => {
+                let frame = match WspFrame::decode(&data) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let tx = inner.pending.lock().get(&frame.stream_id).cloned();
+                if let Some(tx) = tx {
+                    let _ = tx.send(frame);
+                }
+                // 未知 stream 的帧（如过期响应）直接丢弃
+            }
+            Ok(Message::Close(_)) => break,
+            Err(_) => break,
+            _ => {} // Ping/Pong/Text 忽略
+        }
+    }
+    // 仅当仍是当前连接时才清理，避免过期读取线程覆盖新连接
+    if inner.epoch.load(Ordering::Acquire) == epoch {
+        inner.mark_disconnected().await;
+    }
 }
 
 impl WspClient {
@@ -224,12 +275,15 @@ impl WspClient {
         let rt = Runtime::new().map_err(|e| format!("创建 runtime 失败: {}", e))?;
         let client = Self {
             rt,
-            inner: Arc::new(Mutex::new(InnerClient {
-                sink: None,
-                stream: None,
+            inner: Arc::new(InnerClient {
+                sink: tokio::sync::Mutex::new(None),
+                pending: Mutex::new(HashMap::new()),
+                connect_lock: tokio::sync::Mutex::new(()),
+                epoch: AtomicU32::new(0),
+                connected: AtomicBool::new(false),
                 next_seq: AtomicU32::new(1),
                 next_stream: AtomicU32::new(1),
-            })),
+            }),
             server_addr: server_addr.to_string(),
             token: token.to_string(),
         };
@@ -239,11 +293,11 @@ impl WspClient {
 
     /// 确保 WebSocket 已连接（断线重连）
     async fn ensure_connected(&self) -> Result<(), String> {
-        let need_connect = {
-            let inner = self.inner.lock();
-            inner.sink.is_none()
-        };
-        if !need_connect {
+        if self.inner.connected.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.inner.connect_lock.lock().await;
+        if self.inner.connected.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -253,20 +307,21 @@ impl WspClient {
             .map_err(|e| format!("WebSocket 连接失败: {}", e))?;
         let (sink, stream) = ws.split();
 
-        {
-            let mut inner = self.inner.lock();
-            inner.sink = Some(sink);
-            inner.stream = Some(stream);
-        }
+        let epoch = self.inner.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        *self.inner.sink.lock().await = Some(sink);
+        self.inner.connected.store(true, Ordering::Release);
+
+        // 启动后台读取线程（按 stream_id 分发帧）
+        self.rt.spawn(reader_loop(self.inner.clone(), stream, epoch));
 
         // Hello 握手
-        self.send_and_recv(MSG_HELLO, 0, &HelloMsg {
+        self.send_and_recv(MSG_HELLO, &HelloMsg {
             client_name: "LanShareClient".into(),
             version: WSP_VERSION,
         }).await?;
 
         // 认证
-        let auth_resp = self.send_and_recv(MSG_AUTH, 0, &AuthMsg {
+        let auth_resp = self.send_and_recv(MSG_AUTH, &AuthMsg {
             token: self.token.clone(),
         }).await?;
         let ack: AuthAckMsg = auth_resp.json_body()
@@ -284,15 +339,19 @@ impl WspClient {
             "未连接", "连接已断开", "连接已关闭", "连接断开",
             "发送失败", "接收错误", "WebSocket 连接失败",
             "发送下载请求失败", "下载接收错误", "上传发送失败",
+            "下载时连接断开", "上传 ACK 接收失败",
         ];
         KEYWORDS.iter().any(|k| e.contains(k))
     }
 
     /// 强制断开连接（下次 ensure_connected 会重连）
     fn force_disconnect(&self) {
-        let mut inner = self.inner.lock();
-        inner.sink = None;
-        inner.stream = None;
+        self.inner.connected.store(false, Ordering::Release);
+        if let Ok(mut sink) = self.inner.sink.try_lock() {
+            *sink = None;
+        }
+        // 清空在途请求，使其立即失败而非挂起
+        self.inner.pending.lock().clear();
     }
 
     /// 包裹一个操作：连接类错误时自动重连并重试一次
@@ -311,17 +370,14 @@ impl WspClient {
         }
     }
 
-    /// 发送帧并等待指定类型的响应
+    /// 发送请求并等待响应（自动分配唯一 stream_id）
     async fn send_and_recv<T: Serialize>(
         &self,
         msg_type: u8,
-        stream_id: u32,
         body: &T,
     ) -> Result<WspFrame, String> {
-        let seq = {
-            let inner = self.inner.lock();
-            inner.next_seq.fetch_add(1, Ordering::Relaxed)
-        };
+        let stream_id = self.inner.next_stream.fetch_add(1, Ordering::Relaxed);
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
         let frame = WspFrame::json(msg_type, stream_id, seq, body);
         self.send_and_recv_frame(frame).await
     }
@@ -331,157 +387,110 @@ impl WspClient {
     async fn send_raw(
         &self,
         msg_type: u8,
-        stream_id: u32,
         payload: &[u8],
     ) -> Result<WspFrame, String> {
-        let seq = {
-            let inner = self.inner.lock();
-            inner.next_seq.fetch_add(1, Ordering::Relaxed)
-        };
+        let stream_id = self.inner.next_stream.fetch_add(1, Ordering::Relaxed);
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
         let frame = WspFrame::binary(msg_type, stream_id, seq, payload);
         self.send_and_recv_frame(frame).await
     }
 
-    /// 发送帧并接收响应（约定响应 = msg_type + 1）
+    /// 发送帧并等待其 stream_id 对应的响应（读取线程按 stream_id 分发）
     async fn send_and_recv_frame(&self, frame: WspFrame) -> Result<WspFrame, String> {
         let stream_id = frame.stream_id;
-        let msg_type = frame.msg_type;
-        let encoded = frame.encode();
 
-        // 发送
-        {
-            let mut inner = self.inner.lock();
-            if let Some(sink) = inner.sink.as_mut() {
-                sink.send(Message::Binary(encoded.into()))
+        // 注册等待通道
+        let (tx, mut rx) = unbounded_channel::<WspFrame>();
+        self.inner.pending.lock().insert(stream_id, tx);
+
+        // 发送（短暂持有发送端锁，不阻塞其他请求）
+        let send_res = {
+            let mut sink = self.inner.sink.lock().await;
+            match sink.as_mut() {
+                Some(s) => s
+                    .send(Message::Binary(frame.encode().into()))
                     .await
-                    .map_err(|e| format!("发送失败: {}", e))?;
-            } else {
-                return Err("未连接".into());
+                    .map_err(|e| format!("发送失败: {}", e)),
+                None => Err("未连接".into()),
             }
+        };
+        if let Err(e) = send_res {
+            self.inner.pending.lock().remove(&stream_id);
+            return Err(e);
         }
 
-        // 接收响应（匹配 stream_id）
-        let expected_resp = msg_type + 1; // 约定：响应 = 请求 + 1
-        loop {
-            let msg = {
-                let mut inner = self.inner.lock();
-                if let Some(stream) = inner.stream.as_mut() {
-                    stream.next().await
+        // 等待响应（读取线程转发；连接断开时发送端被 drop → 得 None）
+        let result = match rx.recv().await {
+            Some(resp) => {
+                if resp.msg_type == MSG_ERROR {
+                    let err: ErrorMsg = resp
+                        .json_body()
+                        .unwrap_or(ErrorMsg { code: 0, message: "未知错误".into() });
+                    Err(format!("服务端错误: {}", err.message))
                 } else {
-                    return Err("连接已断开".into());
+                    Ok(resp)
                 }
-            };
-            match msg {
-                Some(Ok(Message::Binary(data))) => {
-                    let resp = WspFrame::decode(&data)?;
-                    if resp.msg_type == MSG_ERROR {
-                        let err: ErrorMsg = resp.json_body().unwrap_or(ErrorMsg { code: 0, message: "未知错误".into() });
-                        return Err(format!("服务端错误: {}", err.message));
-                    }
-                    if resp.stream_id == stream_id && resp.msg_type == expected_resp {
-                        return Ok(resp);
-                    }
-                    // 不是我们要的响应，继续等
-                }
-                Some(Ok(Message::Close(_))) => {
-                    let mut inner = self.inner.lock();
-                    inner.sink = None;
-                    inner.stream = None;
-                    return Err("连接已关闭".into());
-                }
-                Some(Err(e)) => {
-                    let mut inner = self.inner.lock();
-                    inner.sink = None;
-                    inner.stream = None;
-                    return Err(format!("接收错误: {}", e));
-                }
-                None => {
-                    let mut inner = self.inner.lock();
-                    inner.sink = None;
-                    inner.stream = None;
-                    return Err("连接已断开".into());
-                }
-                _ => {} // Ping/Pong 等忽略
             }
-        }
+            None => Err("连接已断开".into()),
+        };
+        self.inner.pending.lock().remove(&stream_id);
+        result
     }
 
     /// 发送下载请求并收集所有数据帧
     async fn download_raw(&self, path: &str, offset: u64) -> Result<Vec<u8>, String> {
         self.ensure_connected().await?;
 
-        let stream_id = {
-            let inner = self.inner.lock();
-            inner.next_stream.fetch_add(1, Ordering::Relaxed)
-        };
-        let seq = {
-            let inner = self.inner.lock();
-            inner.next_seq.fetch_add(1, Ordering::Relaxed)
-        };
-
+        let stream_id = self.inner.next_stream.fetch_add(1, Ordering::Relaxed);
+        let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
         let frame = WspFrame::json(MSG_DOWNLOAD_REQ, stream_id, seq, &DownloadReqMsg {
             path: path.to_string(),
             offset,
         });
 
-        {
-            let mut inner = self.inner.lock();
-            if let Some(sink) = inner.sink.as_mut() {
-                sink.send(Message::Binary(frame.encode().into()))
+        // 注册等待通道
+        let (tx, mut rx) = unbounded_channel::<WspFrame>();
+        self.inner.pending.lock().insert(stream_id, tx);
+
+        let send_res = {
+            let mut sink = self.inner.sink.lock().await;
+            match sink.as_mut() {
+                Some(s) => s
+                    .send(Message::Binary(frame.encode().into()))
                     .await
-                    .map_err(|e| format!("发送下载请求失败: {}", e))?;
-            } else {
-                return Err("未连接".into());
+                    .map_err(|e| format!("发送下载请求失败: {}", e)),
+                None => Err("未连接".into()),
             }
+        };
+        if let Err(e) = send_res {
+            self.inner.pending.lock().remove(&stream_id);
+            return Err(e);
         }
 
         let mut data = Vec::new();
-        loop {
-            let msg = {
-                let mut inner = self.inner.lock();
-                if let Some(stream) = inner.stream.as_mut() {
-                    stream.next().await
-                } else {
-                    return Err("连接已断开".into());
-                }
-            };
-            match msg {
-                Some(Ok(Message::Binary(raw))) => {
-                    let resp = WspFrame::decode(&raw)?;
-                    if resp.stream_id != stream_id {
-                        continue;
-                    }
-                    match resp.msg_type {
-                        MSG_DOWNLOAD_DATA => {
-                            // payload: [offset:8][is_last:1][data:N]
-                            if resp.payload.len() > 9 {
-                                data.extend_from_slice(&resp.payload[9..]);
-                            }
+        let result: Result<(), String> = loop {
+            match rx.recv().await {
+                Some(resp) => match resp.msg_type {
+                    MSG_DOWNLOAD_DATA => {
+                        // payload: [offset:8][is_last:1][data:N]
+                        if resp.payload.len() > 9 {
+                            data.extend_from_slice(&resp.payload[9..]);
                         }
-                        MSG_DOWNLOAD_END => break,
-                        MSG_ERROR => {
-                            let err: ErrorMsg = resp.json_body().unwrap_or(ErrorMsg { code: 0, message: "下载错误".into() });
-                            return Err(err.message);
-                        }
-                        _ => {}
                     }
-                }
-                Some(Ok(Message::Close(_))) | None => {
-                    let mut inner = self.inner.lock();
-                    inner.sink = None;
-                    inner.stream = None;
-                    return Err("下载时连接断开".into());
-                }
-                Some(Err(e)) => {
-                    let mut inner = self.inner.lock();
-                    inner.sink = None;
-                    inner.stream = None;
-                    return Err(format!("下载接收错误: {}", e));
-                }
-                _ => {}
+                    MSG_DOWNLOAD_END => break Ok(()),
+                    MSG_ERROR => {
+                        let err: ErrorMsg = resp
+                            .json_body()
+                            .unwrap_or(ErrorMsg { code: 0, message: "下载错误".into() });
+                        break Err(err.message);
+                    }
+                    _ => {}
+                },
+                None => break Err("下载时连接断开".into()),
             }
-        }
-        Ok(data)
+        };
+        self.inner.pending.lock().remove(&stream_id);
+        result.map(|_| data)
     }
 
     // ── 公开同步接口 ──
@@ -490,7 +499,7 @@ impl WspClient {
     pub fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>, String> {
         self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
-            let resp = self.send_and_recv(MSG_LIST_DIR, 0, &ListDirMsg {
+            let resp = self.send_and_recv(MSG_LIST_DIR, &ListDirMsg {
                 path: path.to_string(),
             }).await?;
             let body: ListDirRespMsg = resp.json_body()
@@ -503,7 +512,7 @@ impl WspClient {
     pub fn stat(&self, path: &str) -> Result<StatResp, String> {
         self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
-            let resp = self.send_and_recv(MSG_STAT, 0, &StatMsg {
+            let resp = self.send_and_recv(MSG_STAT, &StatMsg {
                 path: path.to_string(),
             }).await?;
             resp.json_body().map_err(|e| format!("STAT 响应解析失败: {}", e))
@@ -515,13 +524,13 @@ impl WspClient {
         self.rt.block_on(self.with_retry(|| self.download_raw(path, offset)))
     }
 
-    // ── 写操作（mount 客户端需要） ──
+    // ── 写操作（mount 客户端需要）──
 
     /// 创建目录
     pub fn mkdir(&self, path: &str) -> Result<(), String> {
         self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
-            self.send_and_recv(MSG_MKDIR, 0, &MkdirMsg { path: path.to_string() }).await?;
+            self.send_and_recv(MSG_MKDIR, &MkdirMsg { path: path.to_string() }).await?;
             Ok(())
         }))
     }
@@ -530,7 +539,7 @@ impl WspClient {
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
         self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
-            self.send_and_recv(MSG_RENAME, 0, &RenameMsg {
+            self.send_and_recv(MSG_RENAME, &RenameMsg {
                 old_path: old_path.to_string(),
                 new_path: new_path.to_string(),
             }).await?;
@@ -542,75 +551,90 @@ impl WspClient {
     pub fn delete_file(&self, path: &str) -> Result<(), String> {
         self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
-            self.send_and_recv(MSG_DELETE, 0, &DeleteMsg { path: path.to_string() }).await?;
+            self.send_and_recv(MSG_DELETE, &DeleteMsg { path: path.to_string() }).await?;
             Ok(())
         }))
     }
 
     /// 开始上传（声明文件大小，服务器返回续传 offset）
-    /// returns: server-assigned resume offset (0 = fresh)
-    pub fn upload_start(&self, path: &str, size: u64) -> Result<u64, String> {
+    ///
+    /// 返回 `(resume_offset, stream_id)`：后续 upload_data 必须携带同一 stream_id，
+    /// 因为服务端按 stream_id 关联上传会话。
+    pub fn upload_start(&self, path: &str, size: u64) -> Result<(u64, u32), String> {
         self.rt.block_on(self.with_retry(|| async {
             self.ensure_connected().await?;
-            let resp = self.send_and_recv(MSG_UPLOAD_START, 0, &UploadStartMsg {
+            let stream_id = self.inner.next_stream.fetch_add(1, Ordering::Relaxed);
+            let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
+            let frame = WspFrame::json(MSG_UPLOAD_START, stream_id, seq, &UploadStartMsg {
                 path: path.to_string(),
                 size,
-            }).await?;
+            });
+            let resp = self.send_and_recv_frame(frame).await?;
             let ack: UploadAckMsg = resp.json_body()
                 .map_err(|e| format!("上传开始响应解析失败: {}", e))?;
             if !ack.ok {
                 return Err(format!("上传开始失败: {}", ack.error.unwrap_or_default()));
             }
-            Ok(ack.offset)
+            Ok((ack.offset, stream_id))
         }))
     }
 
-    /// 上传一段数据（从 offset 开始）
-    /// 服务端会回 MSG_UPLOAD_ACK(0x23) — 我们读一帧消化掉，避免污染下一次请求的响应。
-    pub fn upload_data(&self, _path: &str, offset: u64, data: &[u8]) -> Result<(), String> {
+    /// 上传一段数据（必须携带 upload_start 返回的 stream_id）
+    ///
+    /// 服务端会回 MSG_UPLOAD_ACK(0x23)，按 stream_id 分发等待。
+    pub fn upload_data(&self, stream_id: u32, offset: u64, data: &[u8]) -> Result<(), String> {
         self.rt.block_on(async {
             self.ensure_connected().await?;
-            let seq = {
-                let inner = self.inner.lock();
-                inner.next_seq.fetch_add(1, Ordering::Relaxed)
-            };
+            let seq = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
             let mut payload = Vec::with_capacity(8 + data.len());
             payload.extend_from_slice(&offset.to_be_bytes());
             payload.extend_from_slice(data);
-            let frame = WspFrame::binary(MSG_UPLOAD_DATA, 0, seq, &payload);
-            let encoded = frame.encode();
+            let frame = WspFrame::binary(MSG_UPLOAD_DATA, stream_id, seq, &payload);
 
-            // 发送
-            {
-                let mut inner = self.inner.lock();
-                if let Some(sink) = inner.sink.as_mut() {
-                    sink.send(Message::Binary(encoded.into()))
+            // 注册等待通道
+            let (tx, mut rx) = unbounded_channel::<WspFrame>();
+            self.inner.pending.lock().insert(stream_id, tx);
+
+            let send_res = {
+                let mut sink = self.inner.sink.lock().await;
+                match sink.as_mut() {
+                    Some(s) => s
+                        .send(Message::Binary(frame.encode().into()))
                         .await
-                        .map_err(|e| format!("上传发送失败: {}", e))?;
-                } else {
-                    return Err("未连接".into());
-                }
-            }
-
-            // 读一帧（必须是 MSG_UPLOAD_ACK）
-            let msg = {
-                let mut inner = self.inner.lock();
-                if let Some(stream) = inner.stream.as_mut() {
-                    stream.next().await
-                } else {
-                    return Err("连接已断开".into());
+                        .map_err(|e| format!("上传发送失败: {}", e)),
+                    None => Err("未连接".into()),
                 }
             };
-            match msg {
-                Some(Ok(Message::Binary(data))) => {
-                    let resp = WspFrame::decode(&data)?;
-                    if resp.msg_type != MSG_UPLOAD_ACK {
-                        return Err(format!("上传期望 ACK (0x23)，收到 0x{:02x}", resp.msg_type));
-                    }
-                    Ok(())
-                }
-                _ => Err("上传 ACK 接收失败".into()),
+            if let Err(e) = send_res {
+                self.inner.pending.lock().remove(&stream_id);
+                return Err(e);
             }
+
+            // 等待 ACK
+            let result = match rx.recv().await {
+                Some(resp) => {
+                    if resp.msg_type == MSG_ERROR {
+                        let err: ErrorMsg = resp
+                            .json_body()
+                            .unwrap_or(ErrorMsg { code: 0, message: "上传错误".into() });
+                        Err(err.message)
+                    } else if resp.msg_type != MSG_UPLOAD_ACK {
+                        Err(format!("上传期望 ACK (0x23)，收到 0x{:02x}", resp.msg_type))
+                    } else {
+                        let ack: UploadAckMsg = resp
+                            .json_body()
+                            .map_err(|e| format!("上传 ACK 解析失败: {}", e))?;
+                        if ack.ok {
+                            Ok(())
+                        } else {
+                            Err(format!("上传失败: {}", ack.error.unwrap_or_default()))
+                        }
+                    }
+                }
+                None => Err("上传 ACK 接收失败".into()),
+            };
+            self.inner.pending.lock().remove(&stream_id);
+            result
         })
     }
 }

@@ -7,6 +7,7 @@
 //! 依赖：WinFsp 2.x（https://winfsp.dev）
 
 mod fs;
+mod tray;
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use winfsp::host::{DebugMode, FileSystemHost, FileSystemParams, MountPoint, VolumeParams};
+use winfsp::host::{DebugMode, FileSystemHost, FileSystemParams, VolumeParams};
 use winfsp::service::FileSystemServiceBuilder;
 use winfsp::winfsp_init_or_die;
 use winfsp::FspError;
@@ -346,6 +347,104 @@ fn default_label() -> String {
     "LanShare".to_string()
 }
 
+// ══════════════════════════════════════════════════════════
+//  敏感信息保护（DPAPI 加密，仅当前 Windows 用户可解密）
+// ══════════════════════════════════════════════════════════
+
+/// 密文前缀，用于区分明文与加密值
+const ENC_PREFIX: &str = "enc:";
+
+/// 使用 DPAPI 加密敏感字符串，返回 "enc:<base64>"；加密失败时回退明文
+#[cfg(windows)]
+fn protect_secret(plain: &str) -> String {
+    use base64::Engine as _;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+    let bytes = plain.as_bytes();
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: bytes.len() as u32,
+        pbData: bytes.as_ptr() as *mut u8,
+    };
+    let mut out_blob: CRYPT_INTEGER_BLOB = unsafe { std::mem::zeroed() };
+
+    let res = unsafe {
+        CryptProtectData(
+            &in_blob,
+            windows::core::PCWSTR::null(),
+            None,
+            None,
+            None,
+            Default::default(),
+            &mut out_blob,
+        )
+    };
+
+    if res.is_ok() && !out_blob.pbData.is_null() {
+        let cipher = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
+        let enc = base64::engine::general_purpose::STANDARD.encode(cipher);
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(out_blob.pbData as _)));
+        }
+        format!("{}{}", ENC_PREFIX, enc)
+    } else {
+        plain.to_string()
+    }
+}
+
+/// 解密 "enc:<base64>" 形式的密文；非加密值原样返回（兼容旧明文配置）
+#[cfg(windows)]
+fn unprotect_secret(value: &str) -> String {
+    use base64::Engine as _;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    let Some(b64) = value.strip_prefix(ENC_PREFIX) else {
+        return value.to_string();
+    };
+    let Ok(cipher) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+        return value.to_string();
+    };
+
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: cipher.len() as u32,
+        pbData: cipher.as_ptr() as *mut u8,
+    };
+    let mut out_blob: CRYPT_INTEGER_BLOB = unsafe { std::mem::zeroed() };
+
+    let res = unsafe {
+        CryptUnprotectData(
+            &in_blob,
+            None,
+            None,
+            None,
+            None,
+            Default::default(),
+            &mut out_blob,
+        )
+    };
+
+    if res.is_ok() && !out_blob.pbData.is_null() {
+        let plain_bytes = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
+        let plain = String::from_utf8_lossy(plain_bytes).into_owned();
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(out_blob.pbData as _)));
+        }
+        plain
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(not(windows))]
+fn protect_secret(plain: &str) -> String {
+    plain.to_string()
+}
+#[cfg(not(windows))]
+fn unprotect_secret(value: &str) -> String {
+    value.to_string()
+}
+
 fn client_config_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
@@ -362,6 +461,13 @@ fn load_client_config() -> Option<ClientConfig> {
             None
         }
     }
+    .map(|mut cfg: ClientConfig| {
+        // 解密敏感字段（兼容旧明文配置）
+        cfg.pin = cfg.pin.map(|v| unprotect_secret(&v));
+        cfg.password = cfg.password.map(|v| unprotect_secret(&v));
+        cfg.token = cfg.token.map(|v| unprotect_secret(&v));
+        cfg
+    })
 }
 
 fn save_client_config(cfg: &ResolvedConfig) -> Result<(), String> {
@@ -389,7 +495,7 @@ label = "{}"
         toml_cfg
             .pin
             .as_ref()
-            .map(|p| format!("pin = \"{}\"\n", p))
+            .map(|p| format!("pin = \"{}\"\n", protect_secret(p)))
             .unwrap_or_default(),
         toml_cfg
             .username
@@ -399,12 +505,12 @@ label = "{}"
         toml_cfg
             .password
             .as_ref()
-            .map(|p| format!("password = \"{}\"\n", p))
+            .map(|p| format!("password = \"{}\"\n", protect_secret(p)))
             .unwrap_or_default(),
         toml_cfg
             .token
             .as_ref()
-            .map(|t| format!("token = \"{}\"\n", t))
+            .map(|t| format!("token = \"{}\"\n", protect_secret(t)))
             .unwrap_or_default(),
         toml_cfg.mount,
         toml_cfg.label,
@@ -482,7 +588,7 @@ fn format_unix_utc(secs: u64) -> String {
 }
 
 /// 追加一条日志（带时间戳）
-fn log(msg: &str) {
+pub(crate) fn log(msg: &str) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -764,23 +870,24 @@ fn main() {
         unreachable!()
     };
 
-    // 把配置通过 Arc 传给 WinFsp 回调
+    // 把配置通过 Arc 传给 WinFsp 回调；drive_tx 用于回传实际盘符
     let mount = cfg.mount.clone();
     let label = cfg.label.clone();
     let server = cfg.server.clone();
 
-    let shared = Arc::new(Mutex::new(Some((server, token, mount, label))));
+    let (drive_tx, drive_rx) = std::sync::mpsc::channel::<String>();
+    let shared = Arc::new(Mutex::new(Some((server, token, mount, label, drive_tx))));
 
     let init = winfsp_init_or_die();
 
     let mut fsp = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let (server, token, mount, label) = shared
+            let (server, token, mount, label, drive_tx) = shared
                 .lock()
                 .unwrap()
                 .take()
                 .expect("配置已被消费");
-            svc_start(&server, &token, &mount, &label)
+            svc_start(&server, &token, &mount, &label, drive_tx)
         })
         .with_stop(|fs| {
             svc_stop(fs);
@@ -790,7 +897,44 @@ fn main() {
         .expect("构建 WinFsp 服务失败");
 
     fsp.start().expect("启动 WinFsp 服务失败");
+
+    // 等待挂载完成并获取实际盘符（挂载在工作线程中进行）
+    match drive_rx.recv() {
+        Ok(drive) => {
+            // 让用户看到挂载成功提示，随后隐藏控制台
+            std::thread::sleep(Duration::from_secs(2));
+            #[cfg(windows)]
+            hide_console();
+            // 主线程运行托盘（阻塞，直到用户选择退出）
+            tray::run_tray(drive);
+            // 优雅停止 WinFsp 服务（触发 svc_stop 卸载盘符）
+            fsp.stop();
+        }
+        Err(_) => {
+            // 挂载失败，服务已自行停止
+            log("挂载失败，服务退出");
+        }
+    }
+
     let _ = fsp.join();
+}
+
+/// 查找空闲盘符（从 Z: 往下，与 WinFsp NextFreeDrive 行为一致）
+#[cfg(windows)]
+fn find_free_drive() -> String {
+    use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+    let mask = unsafe { GetLogicalDrives() };
+    for i in (0..26u32).rev() {
+        if mask & (1 << i) == 0 {
+            return format!("{}:", (b'A' + i as u8) as char);
+        }
+    }
+    "L:".to_string()
+}
+
+#[cfg(not(windows))]
+fn find_free_drive() -> String {
+    "L:".to_string()
 }
 
 fn svc_start(
@@ -798,6 +942,7 @@ fn svc_start(
     token: &str,
     mount: &str,
     label: &str,
+    drive_tx: std::sync::mpsc::Sender<String>,
 ) -> Result<LanShareFsHost, FspError> {
     println!("  🌐 连接 {} ...", server);
     let client = WspClient::connect(server, token).map_err(|e| {
@@ -840,42 +985,34 @@ fn svc_start(
             FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
         })?;
 
-    // 规范化盘符："L" → "L:"，"*" → NextFreeDrive 自动分配
-    if mount == "*" || mount.is_empty() {
-        host.mount(MountPoint::NextFreeDrive).map_err(|_| {
-            FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
-        })?;
+    // 确定盘符："*"/空 → 自动找空闲盘符；"L" → "L:"；其他照旧
+    let drive = if mount == "*" || mount.is_empty() {
+        find_free_drive()
+    } else if mount.len() == 1 && mount.chars().next().unwrap().is_ascii_alphabetic() {
+        format!("{}:", mount)
     } else {
-        let drive = if mount.len() == 1 && mount.chars().next().unwrap().is_ascii_alphabetic() {
-            format!("{}:", mount)
-        } else {
-            mount.to_string()
-        };
-        host.mount(drive.as_str()).map_err(|_| {
-            FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
-        })?;
-    }
+        mount.to_string()
+    };
+
+    host.mount(drive.as_str()).map_err(|_| {
+        FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
+    })?;
 
     host.start()
         .map_err(|_| FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0))?;
 
+    // 通知主线程实际挂载的盘符（用于托盘显示）
+    let _ = drive_tx.send(drive.clone());
+
     println!();
     println!("  ╔══════════════════════════════════════════╗");
-    println!("  ║  ✅ 挂载成功！                           ║");
+    println!("  ║  ✅ 挂载成功！盘符 {}                      ║", drive);
     println!("  ║  在资源管理器中查看盘符                  ║");
-    println!("  ║  窗口即将隐藏，程序在后台运行            ║");
-    println!("  ║  结束进程即可卸载                        ║");
+    println!("  ║  托盘图标可卸载退出                      ║");
     println!("  ╚══════════════════════════════════════════╝");
     println!();
 
-    log("挂载成功，进入后台运行");
-
-    // 挂载成功后延迟关闭控制台，后台运行
-    #[cfg(windows)]
-    {
-        std::thread::sleep(Duration::from_secs(2));
-        hide_console();
-    }
+    log(&format!("挂载成功，盘符 {}", drive));
 
     Ok(LanShareFsHost { host })
 }

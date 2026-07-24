@@ -1215,6 +1215,7 @@ dependencies = [
 name = "lanshare-client"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "futures-util",
  "parking_lot",
