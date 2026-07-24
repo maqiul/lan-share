@@ -91,6 +91,7 @@ pub async fn start_webdav_server(
         .route("/", any(root_handler))
         .route("/ui", get(serve_ui))
         .route("/wsp", get(crate::wsp::wsp_upgrade))
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .fallback(any(handle_request))
         .layer(DefaultBodyLimit::disable())
         .with_state(state);

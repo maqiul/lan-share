@@ -1151,7 +1151,13 @@ async function connectWsp(){
     console.log('[WSP] 已连接');
     document.getElementById('wspChip').style.display = '';
   }catch(e){
-    console.warn('[WSP] 连接失败，回退 WebDAV:', e.message);
+    console.warn('[WSP] 连接失败:', e.message);
+    // token 无效/过期 → 清除并弹登录框
+    TOKEN = '';
+    USER = null;
+    sessionStorage.removeItem('lsp_token');
+    sessionStorage.removeItem('lsp_user');
+    showLogin('连接失败，请重新登录');
   }
 }
 
@@ -1326,7 +1332,7 @@ document.getElementById('btnChangePwd').onclick = async ()=>{
   }catch(e){ errEl.textContent = '修改失败：'+e.message; }
 };
 
-/* 列目录 (WSP 优先，WebDAV 回退) */
+/* 列目录 (WSP) */
 async function loadDir(path){
   curPath = path;
   selected = null;
