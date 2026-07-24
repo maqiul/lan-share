@@ -41,6 +41,9 @@ struct DiscoveredServer {
     lsp_port: u16,
     #[allow(dead_code)]
     version: String,
+    /// 是否简易模式（true=PIN，false=账号密码）
+    #[serde(default)]
+    simple_mode: bool,
 }
 
 impl DiscoveredServer {
@@ -173,7 +176,7 @@ fn interactive_discover() -> Option<ResolvedConfig> {
         if addr.is_empty() {
             return None;
         }
-        return interactive_auth(addr);
+        return interactive_auth(addr, None);
     }
 
     // ── 显示列表 ──
@@ -201,26 +204,42 @@ fn interactive_discover() -> Option<ResolvedConfig> {
     };
 
     let server = servers[choice].addr();
+    let simple_mode = servers[choice].simple_mode;
     println!();
     println!("  已选择: {} ({})", servers[choice].name, server);
+    println!("  模式: {}", if simple_mode { "简易模式（PIN 码）" } else { "账号模式（用户名+密码）" });
     println!();
 
-    interactive_auth(server)
+    interactive_auth(server, Some(simple_mode))
 }
 
-/// 交互认证：选择认证方式 → 输入凭据
-fn interactive_auth(server: String) -> Option<ResolvedConfig> {
-    println!("  认证方式：");
-    println!("    [1] PIN 码（简易模式）");
-    println!("    [2] 账号密码");
-    println!();
-
-    let auth_mode = loop {
-        let input = read_line("  请选择 [1/2]: ");
-        match input.as_str() {
-            "1" => break "pin",
-            "2" => break "account",
-            _ => println!("  请输入 1 或 2"),
+/// 交互认证：根据服务器模式自动选择认证方式 → 输入凭据
+/// known_mode: Some(true)=简易模式, Some(false)=账号模式, None=未知需用户选
+fn interactive_auth(server: String, known_mode: Option<bool>) -> Option<ResolvedConfig> {
+    let auth_mode = match known_mode {
+        Some(true) => {
+            println!("  🔑 该服务器为简易模式，请输入 PIN 码");
+            println!();
+            "pin"
+        }
+        Some(false) => {
+            println!("  🔑 该服务器为账号模式，请输入用户名和密码");
+            println!();
+            "account"
+        }
+        None => {
+            println!("  认证方式：");
+            println!("    [1] PIN 码（简易模式）");
+            println!("    [2] 账号密码");
+            println!();
+            loop {
+                let input = read_line("  请选择 [1/2]: ");
+                match input.as_str() {
+                    "1" => break "pin",
+                    "2" => break "account",
+                    _ => println!("  请输入 1 或 2"),
+                }
+            }
         }
     };
 

@@ -393,12 +393,16 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         });
 
         // 局域网发现服务（UDP 广播）
+        let disc_simple = db.get_admin_setting("simple_mode")
+            .map(|v| v != "false")
+            .unwrap_or(true);
         let discovery_info = Arc::new(discovery::ServerInfo {
             name: device_name.clone(),
             ip: local_ip.clone(),
             webdav_port,
             lsp_port: port,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            simple_mode: disc_simple,
         });
         tokio::spawn(async move {
             if let Err(e) = discovery::start_discovery_server(discovery_info).await {

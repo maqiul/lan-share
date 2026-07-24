@@ -25,6 +25,9 @@ pub struct ServerInfo {
     pub lsp_port: u16,
     /// 协议版本
     pub version: String,
+    /// 是否简易模式（true=PIN，false=账号密码）
+    #[serde(default)]
+    pub simple_mode: bool,
 }
 
 /// 启动发现服务（UDP 监听）
