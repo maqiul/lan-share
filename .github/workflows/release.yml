@@ -1,0 +1,96 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install WinFsp SDK
+        shell: pwsh
+        run: |
+          $url = "https://github.com/winfsp/winfsp/releases/download/v2.1/winfsp-2.1.25156.msi"
+          Write-Host "Downloading WinFsp 2.1 SDK..."
+          Invoke-WebRequest -Uri $url -OutFile winfsp.msi -UseBasicParsing
+          Write-Host "Installing WinFsp (quiet mode)..."
+          Start-Process msiexec.exe -ArgumentList "/i winfsp.msi /qn /norestart" -Wait -NoNewWindow
+          # 验证 SDK 文件就位
+          $libDir = "C:\Program Files (x86)\WinFsp\lib"
+          if (Test-Path $libDir) {
+            Write-Host "WinFsp SDK installed: $libDir"
+            Get-ChildItem $libDir | Select-Object Name
+          } else {
+            Write-Warning "WinFsp lib dir not found, trying alternative path..."
+            $altDir = "C:\Program Files\WinFsp\lib"
+            if (Test-Path $altDir) { Write-Host "Found at: $altDir" }
+            else { Write-Error "WinFsp SDK installation failed" }
+          }
+
+      - name: Build release binaries
+        run: cargo build --release -p lan-share -p lanshare-client
+
+      - name: Run tests
+        run: cargo test -p lsp-protocol
+
+      - name: Package artifacts
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF -match 'refs/tags/(.+)') { $Matches[1] } else { "nightly" }
+          Write-Host "Packaging version: $tag"
+
+          # 服务端
+          New-Item -ItemType Directory -Path pkg\lanshare-server -Force | Out-Null
+          Copy-Item target\release\lan-share.exe pkg\lanshare-server\lanshare-server.exe
+          Compress-Archive -Path pkg\lanshare-server -DestinationPath "lanshare-server-${tag}-win-x64.zip"
+
+          # 客户端
+          New-Item -ItemType Directory -Path pkg\lanshare-client -Force | Out-Null
+          Copy-Item target\release\lanshare-client.exe pkg\lanshare-client\lanshare-client.exe
+          Compress-Archive -Path pkg\lanshare-client -DestinationPath "lanshare-client-${tag}-win-x64.zip"
+
+          Get-ChildItem *.zip | Select-Object Name, Length
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            lanshare-server-*.zip
+            lanshare-client-*.zip
+
+      - name: Upload artifacts (non-tag builds)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanshare-build
+          path: |
+            lanshare-server-*.zip
+            lanshare-client-*.zip
+          retention-days: 7
