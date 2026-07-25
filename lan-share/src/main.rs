@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use lsp_protocol::{LspClient, LspServer, ServerConfig};
+use lsp_protocol::{LspClient, LspServer, ServerConfig, AccountVerifier};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -328,7 +328,15 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         ..Default::default()
     };
 
-    let server = Arc::new(LspServer::new(config));
+    // 账号验证器：将 LSP3 账号认证桥接到本地用户数据库（bcrypt 校验 + 权限映射）
+    let db_for_lsp = db.clone();
+    let account_verifier: AccountVerifier = Arc::new(move |username, password| {
+        db_for_lsp
+            .verify_login(username, password)
+            .map(|user| if user.can_write() { "readwrite".to_string() } else { "read".to_string() })
+    });
+
+    let server = Arc::new(LspServer::new(config).with_account_verifier(account_verifier));
 
     let local_ip = local_ip_address::local_ip()
         .map(|ip| ip.to_string())

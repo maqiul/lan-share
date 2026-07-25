@@ -547,9 +547,19 @@ pub struct AuthChallengePayload {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthResponsePayload {
+    /// PIN 模式证明：SHA256(pin) 的 hex；账号模式留空
     pub pin_proof: String,
     pub device_name: String,
     pub session_token: String,
+    /// 认证模式："pin"（默认，空字符串亦视为 pin）或 "account"
+    #[serde(default)]
+    pub auth_mode: String,
+    /// 账号模式：用户名
+    #[serde(default)]
+    pub username: Option<String>,
+    /// 账号模式：密码（在 ECDH 加密通道内传输）
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

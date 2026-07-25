@@ -9,8 +9,8 @@
 mod fs;
 mod tray;
 
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::io::{self, Write};
+use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,7 +23,7 @@ use winfsp::winfsp_init_or_die;
 use winfsp::FspError;
 
 use fs::LanShareFs;
-use lanshare_client::WspClient;
+use lanshare_client::{LspShareClient, LspAuth};
 
 // ══════════════════════════════════════════════════════════
 //  发现协议（同步 UDP，与服务端 discovery.rs 对应）
@@ -38,7 +38,6 @@ struct DiscoveredServer {
     ip: String,
     #[serde(alias = "webdav_port")]
     web_port: u16,
-    #[allow(dead_code)]
     lsp_port: u16,
     #[allow(dead_code)]
     version: String,
@@ -177,7 +176,7 @@ fn interactive_discover() -> Option<ResolvedConfig> {
         if addr.is_empty() {
             return None;
         }
-        return interactive_auth(addr, None);
+        return interactive_auth(addr, None, default_lsp_port());
     }
 
     // ── 显示列表 ──
@@ -206,17 +205,18 @@ fn interactive_discover() -> Option<ResolvedConfig> {
 
     let server = servers[choice].addr();
     let simple_mode = servers[choice].simple_mode;
+    let lsp_port = servers[choice].lsp_port;
     println!();
     println!("  已选择: {} ({})", servers[choice].name, server);
     println!("  模式: {}", if simple_mode { "简易模式（PIN 码）" } else { "账号模式（用户名+密码）" });
     println!();
 
-    interactive_auth(server, Some(simple_mode))
+    interactive_auth(server, Some(simple_mode), lsp_port)
 }
 
 /// 交互认证：根据服务器模式自动选择认证方式 → 输入凭据
 /// known_mode: Some(true)=简易模式, Some(false)=账号模式, None=未知需用户选
-fn interactive_auth(server: String, known_mode: Option<bool>) -> Option<ResolvedConfig> {
+fn interactive_auth(server: String, known_mode: Option<bool>, lsp_port: u16) -> Option<ResolvedConfig> {
     let auth_mode = match known_mode {
         Some(true) => {
             println!("  🔑 该服务器为简易模式，请输入 PIN 码");
@@ -295,6 +295,7 @@ fn interactive_auth(server: String, known_mode: Option<bool>) -> Option<Resolved
 
     let cfg = ResolvedConfig {
         server,
+        lsp_port,
         pin,
         username,
         password,
@@ -323,6 +324,8 @@ fn interactive_auth(server: String, known_mode: Option<bool>) -> Option<Resolved
 struct ClientConfig {
     #[serde(default = "default_server")]
     server: String,
+    #[serde(default = "default_lsp_port")]
+    lsp_port: u16,
     #[serde(default)]
     pin: Option<String>,
     #[serde(default)]
@@ -339,6 +342,9 @@ struct ClientConfig {
 
 fn default_server() -> String {
     "127.0.0.1:8080".to_string()
+}
+fn default_lsp_port() -> u16 {
+    9820
 }
 fn default_mount() -> String {
     "*".to_string()
@@ -475,6 +481,7 @@ fn save_client_config(cfg: &ResolvedConfig) -> Result<(), String> {
 
     let toml_cfg = ClientConfig {
         server: cfg.server.clone(),
+        lsp_port: cfg.lsp_port,
         pin: cfg.pin.clone(),
         username: cfg.username.clone(),
         password: cfg.password.clone(),
@@ -488,10 +495,12 @@ fn save_client_config(cfg: &ResolvedConfig) -> Result<(), String> {
 # 双击启动时自动读取此配置进行挂载
 
 server = "{}"
+lsp_port = {}
 {}{}{}{}mount = "{}"
 label = "{}"
 "#,
         toml_cfg.server,
+        toml_cfg.lsp_port,
         toml_cfg
             .pin
             .as_ref()
@@ -612,6 +621,10 @@ struct Args {
     #[arg(short, long)]
     server: Option<String>,
 
+    /// LSP3 协议端口（默认 9820；扫描发现时自动获取，仅手动指定服务端且端口非默认时需要）
+    #[arg(long)]
+    lsp_port: Option<u16>,
+
     /// 简易模式 PIN 码
     #[arg(short, long)]
     pin: Option<String>,
@@ -648,6 +661,7 @@ struct Args {
 #[derive(Debug, Clone)]
 struct ResolvedConfig {
     server: String,
+    lsp_port: u16,
     pin: Option<String>,
     username: Option<String>,
     password: Option<String>,
@@ -657,6 +671,12 @@ struct ResolvedConfig {
 }
 
 impl ResolvedConfig {
+    /// LSP3 连接地址（ip:lsp_port）：从 server（ip:web_port）提取 IP 拼接 lsp_port
+    fn lsp_addr(&self) -> String {
+        let ip = self.server.split(':').next().unwrap_or(&self.server);
+        format!("{}:{}", ip, self.lsp_port)
+    }
+
     fn has_auth(&self) -> bool {
         self.pin.is_some()
             || (self.username.is_some() && self.password.is_some())
@@ -672,6 +692,7 @@ impl ResolvedConfig {
         if has_cli_auth {
             return Ok(ResolvedConfig {
                 server: args.server.unwrap_or_else(default_server),
+                lsp_port: args.lsp_port.unwrap_or_else(default_lsp_port),
                 pin: args.pin,
                 username: args.username,
                 password: args.password,
@@ -686,6 +707,7 @@ impl ResolvedConfig {
             if cfg.pin.is_some() || cfg.username.is_some() || cfg.token.is_some() {
                 return Ok(ResolvedConfig {
                     server: args.server.unwrap_or(cfg.server),
+                    lsp_port: args.lsp_port.unwrap_or(cfg.lsp_port),
                     pin: cfg.pin,
                     username: cfg.username,
                     password: cfg.password,
@@ -703,69 +725,6 @@ impl ResolvedConfig {
 
         interactive_discover().ok_or_else(|| "用户取消了操作".to_string())
     }
-}
-
-// ══════════════════════════════════════════════════════════
-//  HTTP 登录
-// ══════════════════════════════════════════════════════════
-
-fn http_login(server: &str, username: &str, password: &str) -> Result<String, String> {
-    let body = serde_json::json!({
-        "username": username,
-        "password": password,
-    });
-    let body_str = body.to_string();
-
-    let request = format!(
-        "POST /api/login HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {}",
-        server,
-        body_str.len(),
-        body_str
-    );
-
-    let mut stream =
-        TcpStream::connect(server).map_err(|e| format!("连接 {} 失败: {}", server, e))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok();
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| format!("发送登录请求失败: {}", e))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| format!("读取登录响应失败: {}", e))?;
-
-    let body_part = response.split("\r\n\r\n").nth(1).unwrap_or("");
-
-    let status_ok = response
-        .lines()
-        .next()
-        .map(|l| l.contains("200"))
-        .unwrap_or(false);
-
-    if !status_ok {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_part) {
-            if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
-                return Err(format!("登录失败: {}", err));
-            }
-        }
-        return Err("登录失败: HTTP 响应异常".to_string());
-    }
-
-    let json: serde_json::Value =
-        serde_json::from_str(body_part).map_err(|e| format!("解析登录响应失败: {}", e))?;
-    json.get("token")
-        .and_then(|t| t.as_str())
-        .map(|t| t.to_string())
-        .ok_or_else(|| "登录响应中无 token".to_string())
 }
 
 // ══════════════════════════════════════════════════════════
@@ -837,7 +796,7 @@ fn main() {
         }
     };
 
-    log(&format!("目标服务器: {}", cfg.server));
+    log(&format!("目标服务器: {}", cfg.lsp_addr()));
 
     if !cfg.has_auth() {
         let msg = "错误：没有认证信息（PIN / 账号密码 / Token）";
@@ -847,50 +806,53 @@ fn main() {
         return;
     }
 
-    // 确定认证 token
-    let token = if let Some(ref pin) = cfg.pin {
-        println!("  🔑 使用 PIN 码认证（简易模式）");
-        pin.clone()
+    // LSP3 认证：优先 PIN，其次账号密码
+    let auth = if let Some(ref pin) = cfg.pin {
+        println!("  🔑 使用 PIN 码认证（LSP3）");
+        LspAuth::Pin(pin.clone())
     } else if let (Some(ref username), Some(ref password)) = (&cfg.username, &cfg.password) {
-        println!("  🔑 使用账号 {} 登录...", username);
-        match http_login(&cfg.server, username, password) {
-            Ok(t) => t,
-            Err(e) => {
-                log(&format!("登录失败: {}", e));
-                eprintln!("\n  ❌ {}", e);
-                show_message_box(&e, "LanShare 客户端 - 登录失败", 0x10);
-                pause_exit();
-                return;
-            }
+        println!("  👤 使用账号认证（LSP3）: {}", username);
+        LspAuth::Account {
+            username: username.clone(),
+            password: password.clone(),
         }
-    } else if let Some(ref token) = cfg.token {
-        println!("  🔑 使用 session token 认证");
-        token.clone()
     } else {
-        unreachable!()
+        let msg = "错误：未配置认证信息，请配置 PIN 或账号密码";
+        log(msg);
+        eprintln!("\n  ❌ {}", msg);
+        show_message_box(msg, "LanShare 客户端", 0x10);
+        pause_exit();
+        return;
     };
 
     // 把配置通过 Arc 传给 WinFsp 回调；drive_tx 用于回传实际盘符
     let mount = cfg.mount.clone();
     let label = cfg.label.clone();
-    let server = cfg.server.clone();
+    let server = cfg.lsp_addr();
 
     let (drive_tx, drive_rx) = std::sync::mpsc::channel::<String>();
-    let shared = Arc::new(Mutex::new(Some((server, token, mount, label, drive_tx))));
+    // client_tx 回传 LSP 客户端句柄，供托盘显示连接状态与手动重连
+    let (client_tx, client_rx) = std::sync::mpsc::channel::<Arc<LspShareClient>>();
+    let shared = Arc::new(Mutex::new(Some((server, auth, mount, label, drive_tx, client_tx))));
 
     let init = winfsp_init_or_die();
 
+    // stop 回调（在工作线程中执行卸载）完成后通过此通道通知主线程，
+    // 主线程据此限时等待优雅卸载，超时则强制退出进程。
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+
     let mut fsp = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let (server, token, mount, label, drive_tx) = shared
+            let (server, auth, mount, label, drive_tx, client_tx) = shared
                 .lock()
                 .unwrap()
                 .take()
                 .expect("配置已被消费");
-            svc_start(&server, &token, &mount, &label, drive_tx)
+            svc_start(&server, &auth, &mount, &label, drive_tx, client_tx)
         })
-        .with_stop(|fs| {
+        .with_stop(move |fs| {
             svc_stop(fs);
+            let _ = stop_tx.send(());
             Ok(())
         })
         .build("LanShareClient", init)
@@ -901,13 +863,25 @@ fn main() {
     // 等待挂载完成并获取实际盘符（挂载在工作线程中进行）
     match drive_rx.recv() {
         Ok(drive) => {
+            // 接收 LSP 客户端句柄（用于托盘状态显示与手动重连）
+            let client_handle = client_rx.recv().ok();
+            // 后台健康探测：周期刷新连接状态，服务端异常时经由 with_retry 自动重连
+            if let Some(ref c) = client_handle {
+                let probe_client = c.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    probe_client.probe();
+                });
+            }
             // 让用户看到挂载成功提示，随后隐藏控制台
             std::thread::sleep(Duration::from_secs(2));
             #[cfg(windows)]
             hide_console();
             // 主线程运行托盘（阻塞，直到用户选择退出）
-            tray::run_tray(drive);
-            // 优雅停止 WinFsp 服务（触发 svc_stop 卸载盘符）
+            tray::run_tray(drive, client_handle);
+            // 优雅停止 WinFsp 服务（触发 svc_stop 卸载盘符）。
+            // stop 仅向服务循环发停止信号、立即返回，真正的卸载在工作线程中进行。
+            log("用户退出，发送停止信号");
             fsp.stop();
         }
         Err(_) => {
@@ -916,7 +890,14 @@ fn main() {
         }
     }
 
-    let _ = fsp.join();
+    // 等待 stop 回调（卸载盘符）完成：正常会很快返回；
+    // 若存在挂起的 I/O 或后台 runtime 导致卸载卡住，则限时等待后强制结束进程——
+    // WinFsp 驱动会在进程退出时兜底卸载盘符，确保「卸载并退出」一定生效。
+    match stop_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(_) => log("服务已优雅停止"),
+        Err(_) => log("服务停止超时，强制退出进程"),
+    }
+    std::process::exit(0);
 }
 
 /// 查找空闲盘符（从 Z: 往下，与 WinFsp NextFreeDrive 行为一致）
@@ -939,14 +920,15 @@ fn find_free_drive() -> String {
 
 fn svc_start(
     server: &str,
-    token: &str,
+    auth: &LspAuth,
     mount: &str,
     label: &str,
     drive_tx: std::sync::mpsc::Sender<String>,
+    client_tx: std::sync::mpsc::Sender<Arc<LspShareClient>>,
 ) -> Result<LanShareFsHost, FspError> {
     println!("  🌐 连接 {} ...", server);
-    let client = WspClient::connect(server, token).map_err(|e| {
-        let msg = format!("WSP 连接失败: {}", e);
+    let client = LspShareClient::connect(server, auth.clone()).map_err(|e| {
+        let msg = format!("LSP3 连接失败: {}", e);
         log(&msg);
         eprintln!("\n  ❌ {}", msg);
         show_message_box(&msg, "LanShare 客户端 - 连接失败", 0x10);
@@ -956,7 +938,10 @@ fn svc_start(
     log(&format!("连接成功: {}", server));
     println!("  ✅ 认证成功，挂载中...");
 
-    let context = LanShareFs::new(Arc::new(client));
+    let client = Arc::new(client);
+    // 回传客户端句柄供托盘使用（状态显示 + 手动重连）
+    let _ = client_tx.send(client.clone());
+    let context = LanShareFs::new(client);
 
     let mut volume_params = VolumeParams::new();
     volume_params

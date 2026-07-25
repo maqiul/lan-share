@@ -81,11 +81,58 @@ pub struct FileLock {
     pub expires_at: i64,
 }
 
+/// 账号验证器：验证 (username, password)，成功返回权限字符串（如 "readwrite"/"read"），失败返回 None。
+///
+/// 由宿主程序（lan-share）注入，将 LSP3 账号认证桥接到其用户数据库。
+/// 未注入时仅支持 PIN 认证。
+pub type AccountVerifier = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
 /// LSP v3.0 服务端
 pub struct LspServer {
     config: ServerConfig,
     sessions: Arc<RwLock<HashMap<String, Session>>>,
     file_locks: Arc<RwLock<HashMap<String, FileLock>>>,
+    account_verifier: Option<AccountVerifier>,
+}
+
+/// 将客户端请求的相对路径安全拼接到共享根目录。
+///
+/// 去除前导 `/` `\` 分隔符，拒绝 `..` 目录穿越，确保结果始终位于 `base` 内。
+/// 修复 Windows 下 `PathBuf::join("/...")` 会丢弃共享目录、暴露整个盘符的问题。
+/// 非法路径（含 `..`）返回 `None`。
+fn safe_join(base: &std::path::Path, req: &str) -> Option<PathBuf> {
+    let trimmed = req.trim_start_matches(|c| c == '/' || c == '\\');
+    let mut result = base.to_path_buf();
+    for seg in trimmed.split(|c| c == '/' || c == '\\') {
+        match seg {
+            "" | "." => continue,
+            ".." => return None,
+            normal => result.push(normal),
+        }
+    }
+    Some(result)
+}
+
+/// 解析共享内路径；非法（目录穿越）时直接返回错误帧
+macro_rules! shared_path {
+    ($config:expr, $req:expr, $frame:expr, $seq:expr) => {
+        match safe_join(&$config.shared_dir, $req) {
+            Some(p) => p,
+            None => {
+                let err = ErrorPayload {
+                    code: 0x03,
+                    message: "Invalid path".to_string(),
+                    stream_id: Some($frame.stream_id),
+                };
+                return Ok(vec![Frame::new(
+                    FrameType::Error,
+                    $frame.stream_id,
+                    $seq,
+                    Bytes::from(serde_json::to_vec(&err)?),
+                )]);
+            }
+        }
+    };
 }
 
 impl LspServer {
@@ -94,7 +141,14 @@ impl LspServer {
             config,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             file_locks: Arc::new(RwLock::new(HashMap::new())),
+            account_verifier: None,
         }
+    }
+
+    /// 注入账号验证器以启用账号模式认证（可选）
+    pub fn with_account_verifier(mut self, verifier: AccountVerifier) -> Self {
+        self.account_verifier = Some(verifier);
+        self
     }
 
     /// 启动 UDP 服务端
@@ -126,6 +180,7 @@ impl LspServer {
                 let socket_clone = socket.clone();
                 let sessions = self.sessions.clone();
                 let file_locks = self.file_locks.clone();
+                let account_verifier = self.account_verifier.clone();
                 let config = ServerConfig {
                     device_id: self.config.device_id.clone(),
                     device_name: self.config.device_name.clone(),
@@ -147,7 +202,7 @@ impl LspServer {
                     let retransmit_handle = UdpConnection::spawn_retransmit_timer(conn.clone());
 
                     let result = Self::handle_peer(
-                        &conn, &config, &sessions, &file_locks,
+                        &conn, &config, &sessions, &file_locks, &account_verifier,
                     ).await;
 
                     retransmit_handle.abort();
@@ -170,6 +225,7 @@ impl LspServer {
         config: &ServerConfig,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
         file_locks: &Arc<RwLock<HashMap<String, FileLock>>>,
+        account_verifier: &Option<AccountVerifier>,
     ) -> Result<()> {
         let peer_addr = conn.peer_addr();
         info!("New peer: {}", peer_addr);
@@ -198,7 +254,7 @@ impl LspServer {
                     Self::handle_auth_init(&frame, &session_id, &key_pair, sessions).await?
                 }
                 FrameType::AuthResponse => {
-                    Self::handle_auth_response(&frame, &session_id, config, sessions).await?
+                    Self::handle_auth_response(&frame, &session_id, config, sessions, account_verifier).await?
                 }
                 FrameType::StreamOpen => {
                     Self::handle_stream_open(&frame, &session_id, sessions).await?
@@ -382,22 +438,41 @@ impl LspServer {
     async fn handle_auth_response(
         frame: &Frame, session_id: &str,
         config: &ServerConfig, sessions: &Arc<RwLock<HashMap<String, Session>>>,
+        account_verifier: &Option<AccountVerifier>,
     ) -> Result<Vec<Frame>> {
         let payload: AuthResponsePayload = serde_json::from_slice(&frame.payload)?;
 
-        let pin_hash = hex::encode(Sha256::digest(config.pin.as_bytes()));
+        // 根据 auth_mode 选择认证方式（空字符串视为 PIN 模式，向后兼容旧客户端）
+        let permission: Option<String> = if payload.auth_mode == "account" {
+            // 账号模式：通过宿主注入的验证器校验用户名/密码
+            match (account_verifier, &payload.username, &payload.password) {
+                (Some(verifier), Some(username), Some(password)) => verifier(username, password),
+                _ => None,
+            }
+        } else {
+            // PIN 模式：校验 SHA256(pin) 证明
+            let pin_hash = hex::encode(Sha256::digest(config.pin.as_bytes()));
+            if payload.pin_proof == pin_hash {
+                Some("readwrite".to_string())
+            } else {
+                None
+            }
+        };
 
-        if payload.pin_proof != pin_hash {
-            let fail = AuthFailPayload {
-                reason: "Invalid PIN".to_string(),
-                error_code: 0x02,
-            };
-            return Ok(vec![Frame::new(FrameType::AuthFail, 0, 0,
-                Bytes::from(serde_json::to_vec(&fail)?))]);
-        }
+        let permission = match permission {
+            Some(p) => p,
+            None => {
+                let fail = AuthFailPayload {
+                    reason: "Authentication failed".to_string(),
+                    error_code: 0x02,
+                };
+                return Ok(vec![Frame::new(FrameType::AuthFail, 0, 0,
+                    Bytes::from(serde_json::to_vec(&fail)?))]);
+            }
+        };
 
         let ok = AuthOkPayload {
-            permission: "readwrite".to_string(),
+            permission: permission.clone(),
             server_proof: "ok".to_string(),
         };
 
@@ -405,12 +480,15 @@ impl LspServer {
             let mut sessions = sessions.write().await;
             if let Some(session) = sessions.get_mut(session_id) {
                 session.state = SessionState::Established;
-                session.permission = "readwrite".to_string();
+                session.permission = permission.clone();
                 session.device_name = payload.device_name.clone();
             }
         }
 
-        info!("Auth success for {}", payload.device_name);
+        info!("Auth success for {} (mode: {}, permission: {})",
+            payload.device_name,
+            if payload.auth_mode == "account" { "account" } else { "pin" },
+            permission);
 
         Ok(vec![Frame::new(FrameType::AuthOk, 0, 0,
             Bytes::from(serde_json::to_vec(&ok)?))])
@@ -460,7 +538,7 @@ impl LspServer {
 
     async fn handle_file_list(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
         let payload: FileListPayload = serde_json::from_slice(&frame.payload)?;
-        let dir_path = config.shared_dir.join(&payload.path);
+        let dir_path = shared_path!(config, &payload.path, frame, 1);
 
         let mut entries = Vec::new();
         if dir_path.exists() && dir_path.is_dir() {
@@ -500,7 +578,7 @@ impl LspServer {
 
     async fn handle_file_stat(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
         let payload: FileStatPayload = serde_json::from_slice(&frame.payload)?;
-        let file_path = config.shared_dir.join(&payload.path);
+        let file_path = shared_path!(config, &payload.path, frame, 1);
 
         if !file_path.exists() {
             let err = ErrorPayload { code: 0x04, message: "File not found".to_string(), stream_id: Some(frame.stream_id) };
@@ -530,7 +608,7 @@ impl LspServer {
 
     async fn handle_file_mkdir(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
         let payload: FileMkdirPayload = serde_json::from_slice(&frame.payload)?;
-        let dir_path = config.shared_dir.join(&payload.path);
+        let dir_path = shared_path!(config, &payload.path, frame, 1);
         fs::create_dir_all(&dir_path).await?;
         info!("Directory created: {}", payload.path);
         Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, 1, Bytes::new())])
@@ -538,8 +616,8 @@ impl LspServer {
 
     async fn handle_file_rename(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
         let payload: FileRenamePayload = serde_json::from_slice(&frame.payload)?;
-        let old_path = config.shared_dir.join(&payload.old_path);
-        let new_path = config.shared_dir.join(&payload.new_path);
+        let old_path = shared_path!(config, &payload.old_path, frame, 1);
+        let new_path = shared_path!(config, &payload.new_path, frame, 1);
 
         if !old_path.exists() {
             let err = ErrorPayload { code: 0x04, message: "Source file not found".to_string(), stream_id: Some(frame.stream_id) };
@@ -554,7 +632,7 @@ impl LspServer {
 
     async fn handle_file_delete(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
         let payload: FileDeletePayload = serde_json::from_slice(&frame.payload)?;
-        let file_path = config.shared_dir.join(&payload.path);
+        let file_path = shared_path!(config, &payload.path, frame, 1);
 
         if !file_path.exists() {
             let err = ErrorPayload { code: 0x04, message: "File not found".to_string(), stream_id: Some(frame.stream_id) };
@@ -574,7 +652,7 @@ impl LspServer {
 
     async fn handle_read_req(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
         let payload: ReadReqPayload = serde_json::from_slice(&frame.payload)?;
-        let file_path = config.shared_dir.join(&payload.path);
+        let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
 
         if !file_path.exists() {
             let err = ErrorPayload { code: 0x04, message: "File not found".to_string(), stream_id: Some(frame.stream_id) };
@@ -606,7 +684,7 @@ impl LspServer {
         write_streams: &mut std::collections::HashMap<u32, String>,
     ) -> Result<Vec<Frame>> {
         let payload: WriteReqPayload = serde_json::from_slice(&frame.payload)?;
-        let file_path = config.shared_dir.join(&payload.path);
+        let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
 
         {
             let locks = file_locks.read().await;
@@ -639,7 +717,8 @@ impl LspServer {
 
         // 通过 stream_id 查找写入路径
         if let Some(path) = write_streams.get(&frame.stream_id) {
-            let temp_path = config.shared_dir.join(path).with_extension("tmp");
+            let resolved = shared_path!(config, path, frame, frame.seq_num);
+            let temp_path = resolved.with_extension("tmp");
             use tokio::io::AsyncSeekExt;
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
@@ -662,7 +741,7 @@ impl LspServer {
         write_streams: &mut std::collections::HashMap<u32, String>,
     ) -> Result<Vec<Frame>> {
         let payload: WriteCommitPayload = serde_json::from_slice(&frame.payload)?;
-        let file_path = config.shared_dir.join(&payload.path);
+        let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
         let temp_path = file_path.with_extension("tmp");
 
         if temp_path.exists() {
@@ -682,7 +761,7 @@ impl LspServer {
         frame: &Frame, config: &ServerConfig, _delta_computer: &DeltaComputer,
     ) -> Result<Vec<Frame>> {
         let payload: DeltaSyncPayload = serde_json::from_slice(&frame.payload)?;
-        let file_path = config.shared_dir.join(&payload.path);
+        let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
 
         let (exists, signature) = if file_path.exists() {
             let data = fs::read(&file_path).await?;
@@ -713,7 +792,7 @@ impl LspServer {
         // 二进制解码
         let (path, source_size, delta_size, instructions_payload) =
             crate::protocol::decode_delta_data(&frame.payload)?;
-        let file_path = config.shared_dir.join(&path);
+        let file_path = shared_path!(config, &path, frame, frame.seq_num);
 
         let old_data = if file_path.exists() { fs::read(&file_path).await? } else { vec![] };
 

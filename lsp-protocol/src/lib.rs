@@ -62,7 +62,7 @@ pub mod transport;
 pub use codec::LspCodec;
 pub use protocol::*;
 pub use client::LspClient;
-pub use server::{LspServer, ServerConfig, Session};
+pub use server::{LspServer, ServerConfig, Session, AccountVerifier};
 pub use error::LspError;
 pub use crypto::{KeyPair, SessionKeys};
 pub use retransmission::RetransmissionManager;

@@ -25,7 +25,7 @@ use winfsp::filesystem::{
     WideNameInfo,
 };
 
-use lanshare_client::wsp_client::{DirEntry, StatResp, WspClient};
+use lanshare_client::lsp_client::{DirEntry, StatResp, LspShareClient};
 
 /// 将 Unix 时间戳（秒）转为 Windows FILETIME（100ns since 1601）
 fn unix_to_filetime(secs: u64) -> u64 {
@@ -71,7 +71,7 @@ struct FileCacheEntry {
 
 /// LanShare 只读文件系统上下文
 pub struct LanShareFs {
-    client: Arc<WspClient>,
+    client: Arc<LspShareClient>,
     /// 目录缓存：路径 → 条目列表（TTL 5 秒）
     dir_cache: RwLock<HashMap<String, DirCacheEntry>>,
     /// 文件内容缓存：路径 → 数据（LRU 淘汰）
@@ -89,7 +89,7 @@ const FILE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const FILE_CACHE_MAX_FILE: usize = 16 * 1024 * 1024;
 
 impl LanShareFs {
-    pub fn new(client: Arc<WspClient>) -> Self {
+    pub fn new(client: Arc<LspShareClient>) -> Self {
         Self {
             client,
             dir_cache: RwLock::new(HashMap::new()),

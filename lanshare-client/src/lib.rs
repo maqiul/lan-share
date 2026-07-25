@@ -1,6 +1,6 @@
-//! LanShare Client library — shared WSP client for any mount backend
+//! LanShare Client library — shared LSP3 client for any mount backend
 //! (WinFsp, Dokan, FUSE, etc.)
 
-pub mod wsp_client;
+pub mod lsp_client;
 
-pub use wsp_client::{DirEntry, StatResp, WspClient};
+pub use lsp_client::{DirEntry, StatResp, LspShareClient, LspAuth};

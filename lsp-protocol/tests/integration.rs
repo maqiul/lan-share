@@ -119,6 +119,148 @@ async fn test_udp_handshake_and_auth() {
     }
 }
 
+/// 启动注入账号验证器的测试服务端
+async fn start_test_server_with_accounts(shared_dir: PathBuf, port: u16) -> tokio::task::JoinHandle<()> {
+    let config = ServerConfig {
+        device_id: "test-server".to_string(),
+        device_name: "Test Server".to_string(),
+        shared_dir,
+        pin: "123456".to_string(),
+        max_streams: 64,
+        max_frame_size: 16 * 1024 * 1024,
+        use_encryption: true,
+        use_compression: true,
+    };
+    let verifier: lsp_protocol::AccountVerifier = Arc::new(|username, password| {
+        match (username, password) {
+            ("alice", "secret") => Some("readwrite".to_string()),
+            ("bob", "readonly") => Some("read".to_string()),
+            _ => None,
+        }
+    });
+    let server = Arc::new(LspServer::new(config).with_account_verifier(verifier));
+    let addr = format!("127.0.0.1:{}", port);
+    tokio::spawn(async move {
+        let _ = server.serve(&addr).await;
+    })
+}
+
+/// 账号模式认证：正确凭据映射权限，错误密码被拒绝
+#[tokio::test]
+async fn test_udp_account_auth() {
+    let port = 19876;
+    let tmp_dir = std::env::temp_dir().join("lsp_test_account_auth");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let result = timeout(Duration::from_secs(15), async {
+        // 正确账号密码 → readwrite
+        let mut client = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-client".to_string(),
+            "Test Client".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client.handshake().await.expect("Handshake failed");
+        let permission = client
+            .authenticate_account("alice", "secret")
+            .await
+            .expect("Account auth failed");
+        assert_eq!(permission, "readwrite");
+        client.goodbye().await.ok();
+
+        // 只读账号 → read（验证服务端采用验证器返回的权限）
+        let mut client2 = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-client-2".to_string(),
+            "Test Client 2".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client2.handshake().await.expect("Handshake failed");
+        let permission2 = client2
+            .authenticate_account("bob", "readonly")
+            .await
+            .expect("Account auth (read) failed");
+        assert_eq!(permission2, "read");
+        client2.goodbye().await.ok();
+
+        // 错误密码 → 认证失败
+        let mut client3 = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-client-3".to_string(),
+            "Test Client 3".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client3.handshake().await.expect("Handshake failed");
+        let bad = client3.authenticate_account("alice", "wrongpass").await;
+        assert!(bad.is_err(), "Wrong password should fail");
+        client3.goodbye().await.ok();
+    })
+    .await;
+
+    server_handle.abort();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if let Err(e) = result {
+        panic!("Test timed out or failed: {:?}", e);
+    }
+}
+
+/// 前导斜杠路径解析：根路径 "/" 应解析到共享目录而非盘符根，且拒绝目录穿越
+#[tokio::test]
+async fn test_udp_leading_slash_path() {
+    let port = 19877;
+    let tmp_dir = std::env::temp_dir().join("lsp_test_slash");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // 在共享目录内放一个标志性文件
+    std::fs::write(tmp_dir.join("marker.txt"), b"hello share").unwrap();
+
+    let server_handle = start_test_server(tmp_dir.clone(), port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let result = timeout(Duration::from_secs(10), async {
+        let mut client = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-client".to_string(),
+            "Test Client".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client.handshake().await.expect("Handshake failed");
+        client.authenticate("123456").await.expect("Auth failed");
+
+        // 根路径 "/" 应列出共享目录内容（含 marker.txt），而非盘符根
+        let entries = client.list_files("/", false).await.expect("List root failed");
+        assert!(
+            entries.iter().any(|e| e.name == "marker.txt"),
+            "root listing should contain marker.txt from shared dir, got: {:?}",
+            entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>()
+        );
+
+        // 带前导斜杠的子路径 stat 应命中共享目录内的文件
+        let stat = client.stat_file("/marker.txt").await.expect("Stat /marker.txt failed");
+        assert_eq!(stat.size, 11);
+
+        // 目录穿越应被拒绝（返回错误，而非逃逸到上级目录）
+        let traversal = client.stat_file("/../lsp_test_slash/marker.txt").await;
+        assert!(traversal.is_err(), "path traversal should be rejected");
+
+        client.goodbye().await.ok();
+    })
+    .await;
+
+    server_handle.abort();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if let Err(e) = result {
+        panic!("Test timed out or failed: {:?}", e);
+    }
+}
+
 #[tokio::test]
 async fn test_udp_file_upload_download() {
     let port = 19872;
