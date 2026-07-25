@@ -120,6 +120,25 @@ pub fn run_tray(drive: String, client: Option<Arc<LspShareClient>>) {
     }
 }
 
+/// 加载内嵌于模块资源的应用图标（build.rs 经 winres 以序号 1 内嵌）；
+/// 加载失败时回退到系统默认图标。
+unsafe fn load_app_icon() -> HICON {
+    let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null())
+        .unwrap_or_default();
+    // MAKEINTRESOURCEW(1)：低 16 位直接作为资源序号
+    match LoadImageW(
+        Some(hinstance.into()),
+        PCWSTR(1 as *mut u16),
+        IMAGE_ICON,
+        0,
+        0,
+        LR_DEFAULTSIZE | LR_SHARED,
+    ) {
+        Ok(h) => HICON(h.0),
+        Err(_) => LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+    }
+}
+
 /// 添加托盘图标
 unsafe fn add_tray_icon(hwnd: HWND) {
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
@@ -128,7 +147,7 @@ unsafe fn add_tray_icon(hwnd: HWND) {
     nid.uID = TRAY_ICON_ID;
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAYICON;
-    nid.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+    nid.hIcon = load_app_icon();
 
     // 悬停提示：LanShare - 已连接 (L:)
     let drive = DRIVE.get().map(|s| s.as_str()).unwrap_or("");

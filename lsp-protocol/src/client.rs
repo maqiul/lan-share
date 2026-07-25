@@ -791,6 +791,114 @@ impl LspClient {
         Ok(file_size)
     }
 
+    /// 上传内存数据到远端文件（供文件系统写回使用，无需本地落盘）
+    ///
+    /// 与 [`upload_file`](Self::upload_file) 协议一致（WriteReq → WriteData×N → WriteCommit），
+    /// 但数据源为内存切片。`overwrite` 恒为 true：远端文件被整体替换。
+    pub async fn upload_data(&self, data: &[u8], remote_path: &str) -> Result<u64> {
+        let file_size = data.len() as u64;
+
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let sha256 = hex::encode(hasher.finalize());
+
+        let (stream_id, mut rx) = self
+            .open_stream(
+                "upload",
+                serde_json::json!({ "path": remote_path, "size": file_size }),
+            )
+            .await?;
+
+        // 发送写入请求
+        let write_req = WriteReqPayload {
+            path: remote_path.to_string(),
+            size: file_size,
+            sha256: sha256.clone(),
+            overwrite: true,
+        };
+
+        let frame = Frame::new(
+            FrameType::WriteReq,
+            stream_id,
+            1,
+            Bytes::from(serde_json::to_vec(&write_req)?),
+        );
+
+        self.send_frame(frame).await?;
+
+        // 等待 WriteReq 的 Ack
+        let resp = Self::recv_on_stream(&mut rx).await?;
+        if resp.frame_type == FrameType::Error {
+            let err: ErrorPayload = serde_json::from_slice(&resp.payload)?;
+            self.close_stream(stream_id).await?;
+            return Err(LspError::Transfer(err.message));
+        }
+
+        // 分块发送数据
+        let chunk_size = DEFAULT_CHUNK_SIZE;
+        let mut offset = 0usize;
+        let mut seq = 2u32;
+
+        while offset < data.len() {
+            // 检查流控
+            if !self.conn.can_send(stream_id).await {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+
+            let end = std::cmp::min(offset + chunk_size, data.len());
+            let chunk = &data[offset..end];
+
+            // 二进制编码：offset(8B) + raw_data
+            let frame = Frame::new(
+                FrameType::WriteData,
+                stream_id,
+                seq,
+                crate::protocol::encode_write_data(offset as u64, chunk),
+            );
+
+            self.send_reliable(frame).await?;
+
+            // 等待 ACK
+            let resp = Self::recv_on_stream(&mut rx).await?;
+            if resp.frame_type == FrameType::Ack {
+                let ack: AckPayload = serde_json::from_slice(&resp.payload)?;
+                self.handle_ack(ack.seq_num, stream_id, chunk.len() as u32)
+                    .await;
+            }
+
+            offset = end;
+            seq += 1;
+            debug!("Uploaded {} / {} bytes", offset, file_size);
+        }
+
+        // 提交写入
+        let commit = WriteCommitPayload {
+            path: remote_path.to_string(),
+            sha256,
+        };
+
+        let frame = Frame::new(
+            FrameType::WriteCommit,
+            stream_id,
+            seq,
+            Bytes::from(serde_json::to_vec(&commit)?),
+        );
+
+        self.send_frame(frame).await?;
+
+        let resp = Self::recv_on_stream(&mut rx).await?;
+        if resp.frame_type == FrameType::Error {
+            let err: ErrorPayload = serde_json::from_slice(&resp.payload)?;
+            self.close_stream(stream_id).await?;
+            return Err(LspError::Transfer(err.message));
+        }
+
+        self.close_stream(stream_id).await?;
+        info!("Upload (memory) complete: {} bytes", file_size);
+        Ok(file_size)
+    }
+
     /// 差异同步上传（只传变化部分）
     pub async fn delta_upload(&self, local_path: PathBuf, remote_path: &str) -> Result<u64> {
         let file_data = fs::read(&local_path).await?;

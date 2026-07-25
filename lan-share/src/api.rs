@@ -56,7 +56,9 @@ impl From<User> for UserResp {
 #[derive(Deserialize)]
 pub struct CreateUserReq {
     pub username: String,
-    pub password: String,
+    /// 密码（可选）：留空时使用默认密码，用户首次登录强制修改
+    #[serde(default)]
+    pub password: Option<String>,
     pub role: String,
     pub shared_dir: Option<String>,
     /// 权限列表（逗号分隔），默认全部权限
@@ -66,6 +68,9 @@ pub struct CreateUserReq {
     #[serde(default)]
     pub quota_mb: i64,
 }
+
+/// 新建用户未指定密码时的默认密码（首次登录强制修改）
+const DEFAULT_USER_PASSWORD: &str = "Lanshare@123";
 
 fn default_permissions() -> String {
     "read,write,delete,rename,share,mkdir".to_string()
@@ -281,9 +286,16 @@ pub async fn create_user(
     if req.username.is_empty() {
         return bad_request_json("用户名不能为空");
     }
-    if let Err(msg) = validate_password(&req.password) {
-        return bad_request_json(&msg);
-    }
+    // 密码：留空用默认密码（首次登录强制修改），否则验证复杂性
+    let password = match req.password.as_deref() {
+        Some(p) if !p.trim().is_empty() => {
+            if let Err(msg) = validate_password(p) {
+                return bad_request_json(&msg);
+            }
+            p.to_string()
+        }
+        _ => DEFAULT_USER_PASSWORD.to_string(),
+    };
     if req.role != "admin" && req.role != "user" {
         return bad_request_json("role 必须是 admin 或 user");
     }
@@ -301,7 +313,7 @@ pub async fn create_user(
         }
     };
 
-    match state.db.create_user(&req.username, &req.password, &req.role, shared_dir.as_deref(), &req.permissions, req.quota_mb) {
+    match state.db.create_user(&req.username, &password, &req.role, shared_dir.as_deref(), &req.permissions, req.quota_mb) {
         Ok(id) => {
             state.db.audit_log(Some(user.id), &user.username, "create_user", None, Some(&format!("用户: {}", req.username)), None);
             json_resp(StatusCode::CREATED, &format!(r#"{{"ok":true,"id":{id}}}"#))

@@ -107,7 +107,7 @@ async fn test_udp_handshake_and_auth() {
 
         client.handshake().await.expect("Handshake failed");
         let permission = client.authenticate("123456").await.expect("Auth failed");
-        assert_eq!(permission, "readwrite");
+        assert_eq!(permission, "read,write,delete,rename,mkdir");
         client.goodbye().await.ok();
     })
     .await;
@@ -133,8 +133,10 @@ async fn start_test_server_with_accounts(shared_dir: PathBuf, port: u16) -> toki
     };
     let verifier: lsp_protocol::AccountVerifier = Arc::new(|username, password| {
         match (username, password) {
-            ("alice", "secret") => Some("readwrite".to_string()),
+            ("alice", "secret") => Some("read,write,delete,rename,share,mkdir".to_string()),
             ("bob", "readonly") => Some("read".to_string()),
+            // 细粒度测试账号：可写+建目录，但不可删除/重命名
+            ("carol", "writeonly") => Some("read,write,mkdir".to_string()),
             _ => None,
         }
     });
@@ -156,7 +158,7 @@ async fn test_udp_account_auth() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let result = timeout(Duration::from_secs(15), async {
-        // 正确账号密码 → readwrite
+        // 正确账号密码 → 全部权限
         let mut client = LspClient::connect(
             &format!("127.0.0.1:{}", port),
             "test-client".to_string(),
@@ -169,7 +171,7 @@ async fn test_udp_account_auth() {
             .authenticate_account("alice", "secret")
             .await
             .expect("Account auth failed");
-        assert_eq!(permission, "readwrite");
+        assert_eq!(permission, "read,write,delete,rename,share,mkdir");
         client.goodbye().await.ok();
 
         // 只读账号 → read（验证服务端采用验证器返回的权限）
@@ -500,6 +502,176 @@ async fn test_udp_delta_transfer() {
         let server_data = std::fs::read(&server_file).unwrap();
         assert_eq!(server_data.len(), file_size, "Server file size mismatch");
         assert_eq!(server_data, modified_data, "Server file content mismatch after delta");
+
+        client.goodbye().await.ok();
+    })
+    .await;
+
+    server_handle.abort();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if let Err(e) = result {
+        panic!("Test timed out or failed: {:?}", e);
+    }
+}
+
+/// 只读账号（bob）的写操作应被服务端拒绝，读操作正常
+#[tokio::test]
+async fn test_udp_readonly_write_denied() {
+    let port = 19878;
+    let tmp_dir = std::env::temp_dir().join("lsp_test_readonly");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // 预置一个可读文件
+    std::fs::write(tmp_dir.join("existing.txt"), b"readonly content").unwrap();
+
+    let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let result = timeout(Duration::from_secs(15), async {
+        let mut client = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-readonly".to_string(),
+            "Test ReadOnly".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client.handshake().await.expect("Handshake failed");
+        let permission = client
+            .authenticate_account("bob", "readonly")
+            .await
+            .expect("Account auth failed");
+        assert_eq!(permission, "read");
+
+        // 写操作一律被拒（服务端返回 0x05 错误帧）
+        assert!(client.mkdir("hacked_dir").await.is_err(), "mkdir should be denied");
+        assert!(client.upload_data(b"hack", "hacked.txt").await.is_err(), "upload_data should be denied");
+        assert!(client.delete_file("existing.txt", false).await.is_err(), "delete should be denied");
+        assert!(client.rename("existing.txt", "renamed.txt").await.is_err(), "rename should be denied");
+
+        // 服务端文件未被破坏
+        assert!(tmp_dir.join("existing.txt").exists(), "existing file must remain");
+        assert!(!tmp_dir.join("hacked_dir").exists(), "mkdir must not happen");
+        assert!(!tmp_dir.join("hacked.txt").exists(), "upload must not happen");
+
+        // 读操作正常
+        let entries = client.list_files("/", false).await.expect("list should work");
+        assert!(entries.iter().any(|e| e.name == "existing.txt"));
+        let stat = client.stat_file("existing.txt").await.expect("stat should work");
+        assert_eq!(stat.size, 16);
+
+        client.goodbye().await.ok();
+    })
+    .await;
+
+    server_handle.abort();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if let Err(e) = result {
+        panic!("Test timed out or failed: {:?}", e);
+    }
+}
+
+/// 内存缓冲上传（upload_data）：读写账号直接由内存写入远端文件
+#[tokio::test]
+async fn test_udp_upload_data_memory() {
+    let port = 19879;
+    let tmp_dir = std::env::temp_dir().join("lsp_test_upload_data");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let result = timeout(Duration::from_secs(15), async {
+        let mut client = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-upload-data".to_string(),
+            "Test UploadData".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client.handshake().await.expect("Handshake failed");
+        let permission = client
+            .authenticate_account("alice", "secret")
+            .await
+            .expect("Account auth failed");
+        assert_eq!(permission, "read,write,delete,rename,share,mkdir");
+
+        // 内存数据上传（无需本地落盘）
+        let test_data = b"Hello from memory buffer upload!";
+        let uploaded = client
+            .upload_data(test_data, "memory.txt")
+            .await
+            .expect("upload_data failed");
+        assert_eq!(uploaded, test_data.len() as u64);
+
+        // 验证服务端文件内容
+        let server_data = std::fs::read(tmp_dir.join("memory.txt")).unwrap();
+        assert_eq!(server_data, test_data);
+
+        // 覆盖写：upload_data 恒为整体替换
+        let new_data = b"overwritten";
+        client.upload_data(new_data, "memory.txt").await.expect("overwrite failed");
+        let server_data = std::fs::read(tmp_dir.join("memory.txt")).unwrap();
+        assert_eq!(server_data, new_data);
+
+        client.goodbye().await.ok();
+    })
+    .await;
+
+    server_handle.abort();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    if let Err(e) = result {
+        panic!("Test timed out or failed: {:?}", e);
+    }
+}
+
+/// 细粒度权限：carol(read,write,mkdir) 可上传/建目录，但删除/重命名被拒
+#[tokio::test]
+async fn test_udp_fine_grained_permissions() {
+    let port = 19880;
+    let tmp_dir = std::env::temp_dir().join("lsp_test_fine_grained");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    std::fs::write(tmp_dir.join("target.txt"), b"to be renamed or deleted").unwrap();
+
+    let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let result = timeout(Duration::from_secs(15), async {
+        let mut client = LspClient::connect(
+            &format!("127.0.0.1:{}", port),
+            "test-fine-grained".to_string(),
+            "Test FineGrained".to_string(),
+        )
+        .await
+        .expect("UDP connect failed");
+        client.handshake().await.expect("Handshake failed");
+        let permission = client
+            .authenticate_account("carol", "writeonly")
+            .await
+            .expect("Account auth failed");
+        assert_eq!(permission, "read,write,mkdir");
+
+        // write 权限 ✓：上传文件成功
+        client
+            .upload_data(b"carol was here", "carol.txt")
+            .await
+            .expect("upload_data should succeed with write perm");
+        assert_eq!(std::fs::read(tmp_dir.join("carol.txt")).unwrap(), b"carol was here");
+
+        // mkdir 权限 ✓：建目录成功
+        client.mkdir("carol_dir").await.expect("mkdir should succeed with mkdir perm");
+        assert!(tmp_dir.join("carol_dir").is_dir());
+
+        // delete 权限 ✗：删除被拒
+        let del_err = client.delete_file("target.txt", false).await;
+        assert!(del_err.is_err(), "delete should be denied without delete perm");
+        assert!(tmp_dir.join("target.txt").exists(), "file must still exist after denied delete");
+
+        // rename 权限 ✗：重命名被拒
+        let ren_err = client.rename("target.txt", "renamed.txt").await;
+        assert!(ren_err.is_err(), "rename should be denied without rename perm");
+        assert!(tmp_dir.join("target.txt").exists(), "file must still exist after denied rename");
 
         client.goodbye().await.ok();
     })

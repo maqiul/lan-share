@@ -2,7 +2,7 @@
 name = "lanshare-client"
 version = "0.1.0"
 edition = "2021"
-description = "LanShare WinFsp 客户端 - 将远程共享挂载为本地盘符（只读）"
+description = "LanShare WinFsp 客户端 - 将远程共享挂载为本地盘符"
 autotests = false
 autobins = false
 autolib = false
@@ -44,3 +44,4 @@ windows = { version = "0.61", features = [
 
 [build-dependencies]
 winfsp = { version = "0.13", features = ["delayload"] }
+winres = "0.1"

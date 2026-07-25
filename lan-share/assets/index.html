@@ -604,7 +604,7 @@ main{flex:1;display:flex;min-height:0}
       </label>
       <label class="setitem" id="uePwdRow">
         <span class="setlabel" data-i18n="password">密码</span>
-        <input class="setinput" id="uePassword" type="password" autocomplete="off">
+        <input class="setinput" id="uePassword" type="password" autocomplete="off" data-i18n-placeholder="pwdPlaceholder" placeholder="留空则使用默认密码（首次登录需修改）">
       </label>
       <label class="setitem">
         <span class="setlabel" data-i18n="roleCol">角色</span>
@@ -704,6 +704,7 @@ const I18N = {
     loginHint: '登录以访问 {name} 的共享文件',
     username: '用户名',
     password: '密码',
+    pwdPlaceholder: '留空则使用默认密码（首次登录需修改）',
     login: '登录',
     changePwdTitle: '修改密码',
     changePwdHint: '首次登录需要修改默认密码',
@@ -836,6 +837,7 @@ const I18N = {
     loginHint: 'Login to access {name} shared files',
     username: 'Username',
     password: 'Password',
+    pwdPlaceholder: 'Leave blank for default password (must change on first login)',
     login: 'Login',
     changePwdTitle: 'Change Password',
     changePwdHint: 'First login requires password change',
@@ -2294,10 +2296,12 @@ async function saveUser(){
       toast('✓ ' + t('userUpdated'));
     }else{
       const pwd = document.getElementById('uePassword').value;
-      const err = validatePwd(pwd);
-      if(err){ toast(err, 'err'); return; }
-      await api('POST', '/api/admin/users', {username, password: pwd, role, shared_dir: sharedDir, quota_mb: quota, permissions});
-      toast('✓ ' + t('userCreated'));
+      if(pwd){
+        const err = validatePwd(pwd);
+        if(err){ toast(err, 'err'); return; }
+      }
+      await api('POST', '/api/admin/users', {username, password: pwd || undefined, role, shared_dir: sharedDir, quota_mb: quota, permissions});
+      toast('✓ ' + t('userCreated') + (pwd ? '' : `（默认密码: Lanshare@123）`));
     }
     closeUserEdit();
     loadUsers();

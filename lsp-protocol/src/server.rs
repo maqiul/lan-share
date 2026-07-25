@@ -81,8 +81,10 @@ pub struct FileLock {
     pub expires_at: i64,
 }
 
-/// 账号验证器：验证 (username, password)，成功返回权限字符串（如 "readwrite"/"read"），失败返回 None。
+/// 账号验证器：验证 (username, password)，成功返回逗号分隔的权限列表，失败返回 None。
 ///
+/// 权限项：read / write / delete / rename / mkdir / share，如 "read,write,delete,rename,mkdir"。
+/// 兼容旧格式 "readwrite"（视为拥有全部写类权限）。
 /// 由宿主程序（lan-share）注入，将 LSP3 账号认证桥接到其用户数据库。
 /// 未注入时仅支持 PIN 认证。
 pub type AccountVerifier = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
@@ -133,6 +135,43 @@ macro_rules! shared_path {
             }
         }
     };
+}
+
+/// 检查会话是否具备指定权限项（如 "write"/"delete"/"rename"/"mkdir"）。
+///
+/// `Session.permission` 为逗号分隔的权限列表（如 "read,write,delete"）。
+/// 兼容旧格式 "readwrite"：视为拥有全部写类权限。
+async fn session_can(
+    sessions: &Arc<RwLock<HashMap<String, Session>>>,
+    session_id: &str,
+    perm: &str,
+) -> bool {
+    let guard = sessions.read().await;
+    guard
+        .get(session_id)
+        .map(|s| {
+            // 旧格式兼容："readwrite" 等价于全部写类权限
+            if s.permission == "readwrite" {
+                return true;
+            }
+            s.permission.split(',').any(|p| p.trim() == perm)
+        })
+        .unwrap_or(false)
+}
+
+/// 构造「权限不足」错误帧
+fn permission_denied_frame(stream_id: u32, seq: u32, perm: &str) -> Frame {
+    let err = ErrorPayload {
+        code: 0x05,
+        message: format!("Permission denied (requires '{}')", perm),
+        stream_id: Some(stream_id),
+    };
+    Frame::new(
+        FrameType::Error,
+        stream_id,
+        seq,
+        Bytes::from(serde_json::to_vec(&err).unwrap_or_default()),
+    )
 }
 
 impl LspServer {
@@ -269,19 +308,19 @@ impl LspServer {
                     Self::handle_file_stat(&frame, config).await?
                 }
                 FrameType::FileMkdir => {
-                    Self::handle_file_mkdir(&frame, config).await?
+                    Self::handle_file_mkdir(&frame, &session_id, config, sessions).await?
                 }
                 FrameType::FileRename => {
-                    Self::handle_file_rename(&frame, config).await?
+                    Self::handle_file_rename(&frame, &session_id, config, sessions).await?
                 }
                 FrameType::FileDelete => {
-                    Self::handle_file_delete(&frame, config).await?
+                    Self::handle_file_delete(&frame, &session_id, config, sessions).await?
                 }
                 FrameType::ReadReq => {
                     Self::handle_read_req(&frame, config).await?
                 }
                 FrameType::WriteReq => {
-                    Self::handle_write_req(&frame, &session_id, config, file_locks, &mut write_streams).await?
+                    Self::handle_write_req(&frame, &session_id, config, sessions, file_locks, &mut write_streams).await?
                 }
                 FrameType::WriteData => {
                     Self::handle_write_data(&frame, config, &write_streams).await?
@@ -450,10 +489,10 @@ impl LspServer {
                 _ => None,
             }
         } else {
-            // PIN 模式：校验 SHA256(pin) 证明
+            // PIN 模式：校验 SHA256(pin) 证明，授予全部权限
             let pin_hash = hex::encode(Sha256::digest(config.pin.as_bytes()));
             if payload.pin_proof == pin_hash {
-                Some("readwrite".to_string())
+                Some("read,write,delete,rename,mkdir".to_string())
             } else {
                 None
             }
@@ -606,7 +645,13 @@ impl LspServer {
             Bytes::from(serde_json::to_vec(&resp)?))])
     }
 
-    async fn handle_file_mkdir(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
+    async fn handle_file_mkdir(
+        frame: &Frame, session_id: &str, config: &ServerConfig,
+        sessions: &Arc<RwLock<HashMap<String, Session>>>,
+    ) -> Result<Vec<Frame>> {
+        if !session_can(sessions, session_id, "mkdir").await {
+            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "mkdir")]);
+        }
         let payload: FileMkdirPayload = serde_json::from_slice(&frame.payload)?;
         let dir_path = shared_path!(config, &payload.path, frame, 1);
         fs::create_dir_all(&dir_path).await?;
@@ -614,7 +659,13 @@ impl LspServer {
         Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, 1, Bytes::new())])
     }
 
-    async fn handle_file_rename(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
+    async fn handle_file_rename(
+        frame: &Frame, session_id: &str, config: &ServerConfig,
+        sessions: &Arc<RwLock<HashMap<String, Session>>>,
+    ) -> Result<Vec<Frame>> {
+        if !session_can(sessions, session_id, "rename").await {
+            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "rename")]);
+        }
         let payload: FileRenamePayload = serde_json::from_slice(&frame.payload)?;
         let old_path = shared_path!(config, &payload.old_path, frame, 1);
         let new_path = shared_path!(config, &payload.new_path, frame, 1);
@@ -630,7 +681,13 @@ impl LspServer {
         Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, 1, Bytes::new())])
     }
 
-    async fn handle_file_delete(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
+    async fn handle_file_delete(
+        frame: &Frame, session_id: &str, config: &ServerConfig,
+        sessions: &Arc<RwLock<HashMap<String, Session>>>,
+    ) -> Result<Vec<Frame>> {
+        if !session_can(sessions, session_id, "delete").await {
+            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "delete")]);
+        }
         let payload: FileDeletePayload = serde_json::from_slice(&frame.payload)?;
         let file_path = shared_path!(config, &payload.path, frame, 1);
 
@@ -680,9 +737,13 @@ impl LspServer {
 
     async fn handle_write_req(
         frame: &Frame, session_id: &str, config: &ServerConfig,
+        sessions: &Arc<RwLock<HashMap<String, Session>>>,
         file_locks: &Arc<RwLock<HashMap<String, FileLock>>>,
         write_streams: &mut std::collections::HashMap<u32, String>,
     ) -> Result<Vec<Frame>> {
+        if !session_can(sessions, session_id, "write").await {
+            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "write")]);
+        }
         let payload: WriteReqPayload = serde_json::from_slice(&frame.payload)?;
         let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
 

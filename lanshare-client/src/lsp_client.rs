@@ -50,6 +50,9 @@ pub struct LspShareClient {
     auth: LspAuth,
     /// 连接健康状态：最近一次操作/探测成功为 true，连接类失败为 false。供托盘显示连接状态。
     healthy: Arc<AtomicBool>,
+    /// 认证后服务端授予的权限列表（逗号分隔，如 "read,write,delete,rename,mkdir"）。
+    /// 决定挂载卷是否可写：无任何写类权限时 WinFsp 以只读卷挂载。
+    permission: String,
 }
 
 struct InnerLsp {
@@ -57,20 +60,18 @@ struct InnerLsp {
     client: tokio::sync::Mutex<Arc<LspClient>>,
 }
 
-/// 建立一个新的 LSP3 客户端（UDP 连接 + 握手 + 认证）
-async fn build_client(addr: &str, auth: &LspAuth) -> Result<LspClient, LspError> {
+/// 建立一个新的 LSP3 客户端（UDP 连接 + 握手 + 认证），返回客户端与服务端授予的权限字符串
+async fn build_client(addr: &str, auth: &LspAuth) -> Result<(LspClient, String), LspError> {
     let device_id = format!("lanshare-mount-{}", std::process::id());
     let mut client = LspClient::connect(addr, device_id, "LanShare Mount Client".to_string()).await?;
     client.handshake().await?;
-    match auth {
-        LspAuth::Pin(pin) => {
-            client.authenticate(pin).await?;
-        }
+    let permission = match auth {
+        LspAuth::Pin(pin) => client.authenticate(pin).await?,
         LspAuth::Account { username, password } => {
-            client.authenticate_account(username, password).await?;
+            client.authenticate_account(username, password).await?
         }
-    }
-    Ok(client)
+    };
+    Ok((client, permission))
 }
 
 /// 判断是否为连接类错误（值得重连重试）
@@ -90,7 +91,7 @@ impl LspShareClient {
     /// 创建客户端并连接 + 认证
     pub fn connect(server_addr: &str, auth: LspAuth) -> Result<Self, String> {
         let rt = Runtime::new().map_err(|e| format!("创建 runtime 失败: {}", e))?;
-        let client = rt
+        let (client, permission) = rt
             .block_on(build_client(server_addr, &auth))
             .map_err(|e| format!("LSP3 连接失败: {}", e))?;
         Ok(Self {
@@ -101,6 +102,7 @@ impl LspShareClient {
             server_addr: server_addr.to_string(),
             auth,
             healthy: Arc::new(AtomicBool::new(true)),
+            permission,
         })
     }
 
@@ -119,7 +121,7 @@ impl LspShareClient {
         let new_client = build_client(&self.server_addr, &self.auth)
             .await
             .map_err(|e| format!("LSP3 重连失败: {}", e))?;
-        *guard = Arc::new(new_client);
+        *guard = Arc::new(new_client.0);
         Ok(())
     }
 
@@ -156,6 +158,26 @@ impl LspShareClient {
         self.healthy.load(Ordering::Acquire)
     }
 
+    /// 是否具备写类权限（write/delete/rename/mkdir 任一）。决定挂载卷是否可写。
+    /// 兼容旧格式 "readwrite"（视为全部权限）。
+    pub fn is_writable(&self) -> bool {
+        if self.permission == "readwrite" {
+            return true;
+        }
+        self.permission
+            .split(',')
+            .any(|p| matches!(p.trim(), "write" | "delete" | "rename" | "mkdir"))
+    }
+
+    /// 检查是否具备指定权限项（如 "write"/"delete"/"rename"/"mkdir"）。
+    /// 兼容旧格式 "readwrite"（视为全部权限）。
+    pub fn can(&self, perm: &str) -> bool {
+        if self.permission == "readwrite" {
+            return true;
+        }
+        self.permission.split(',').any(|p| p.trim() == perm)
+    }
+
     /// 强制重新连接（同步）。无论当前状态如何，都完整重新握手+认证，
     /// 成功后将健康状态置为 true。供托盘「重新连接」按钮调用。
     pub fn force_reconnect(&self) -> Result<(), String> {
@@ -164,7 +186,7 @@ impl LspShareClient {
             let new_client = build_client(&self.server_addr, &self.auth)
                 .await
                 .map_err(|e| format!("LSP3 重连失败: {}", e))?;
-            *guard = Arc::new(new_client);
+            *guard = Arc::new(new_client.0);
             self.healthy.store(true, Ordering::Release);
             Ok(())
         })
@@ -222,6 +244,30 @@ impl LspShareClient {
     /// 下载文件（从 offset 开始读到末尾）
     pub fn download(&self, path: &str, offset: u64) -> Result<Vec<u8>, String> {
         self.rt.block_on(self.with_retry(|c| async move { c.read_range(path, offset, 0).await }))
+    }
+
+    /// 上传内存数据到远端文件（整文件替换）。供 WinFsp 写回缓存使用。
+    pub fn upload_data(&self, path: &str, data: &[u8]) -> Result<u64, String> {
+        let data = data.to_vec();
+        self.rt.block_on(self.with_retry(|c| {
+            let data = data.clone();
+            async move { c.upload_data(&data, path).await }
+        }))
+    }
+
+    /// 创建目录（含中间路径）
+    pub fn mkdir(&self, path: &str) -> Result<(), String> {
+        self.rt.block_on(self.with_retry(|c| async move { c.mkdir(path).await }))
+    }
+
+    /// 删除文件或目录（目录需 recursive=true）
+    pub fn delete(&self, path: &str, recursive: bool) -> Result<(), String> {
+        self.rt.block_on(self.with_retry(|c| async move { c.delete_file(path, recursive).await }))
+    }
+
+    /// 重命名/移动
+    pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
+        self.rt.block_on(self.with_retry(|c| async move { c.rename(old_path, new_path).await }))
     }
 }
 

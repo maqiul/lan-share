@@ -34,7 +34,7 @@ REM 3. 写 README
     echo LanShare Client v%VER%
     echo =====================================
     echo.
-    echo LanShare 客户端：将远程 LanShare 共享挂载为本地盘符（只读）。
+    echo LanShare 客户端：将远程 LanShare 共享挂载为本地盘符（权限允许时可读写）。
     echo.
     echo 【依赖】
     echo   - Windows 10 / 11

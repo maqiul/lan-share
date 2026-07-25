@@ -1,4 +1,4 @@
-//! LanShare Client — 将远程 LanShare 共享挂载为本地盘符（只读）
+//! LanShare Client — 将远程 LanShare 共享挂载为本地盘符（权限允许时可读写）
 //!
 //! 双击启动：自动扫描局域网 → 选择服务器 → 输入密码 → 挂载
 //! 命令行：  lanshare-client --server IP:PORT --pin 123456 --mount L:
@@ -615,7 +615,7 @@ pub(crate) fn log(msg: &str) {
 // ══════════════════════════════════════════════════════════
 
 #[derive(Parser, Debug)]
-#[command(name = "lanshare-client", about = "LanShare 网络驱动器挂载（只读）")]
+#[command(name = "lanshare-client", about = "LanShare 网络驱动器挂载")]
 struct Args {
     /// LanShare 服务端地址（IP:端口）
     #[arg(short, long)]
@@ -939,6 +939,8 @@ fn svc_start(
     println!("  ✅ 认证成功，挂载中...");
 
     let client = Arc::new(client);
+    // 服务端授予的权限决定卷是否可写：只读权限时以只读卷挂载
+    let writable = client.is_writable();
     // 回传客户端句柄供托盘使用（状态显示 + 手动重连）
     let _ = client_tx.send(client.clone());
     let context = LanShareFs::new(client);
@@ -954,7 +956,7 @@ fn svc_start(
         .case_preserved_names(true)
         .unicode_on_disk(true)
         .persistent_acls(true)
-        .read_only_volume(true)
+        .read_only_volume(!writable)
         .allow_open_in_kernel_mode(true);
 
     volume_params.filesystem_name(label);
@@ -997,7 +999,10 @@ fn svc_start(
     println!("  ╚══════════════════════════════════════════╝");
     println!();
 
-    log(&format!("挂载成功，盘符 {}", drive));
+    println!("  权限模式：{}", if writable { "可读写" } else { "只读" });
+    println!();
+
+    log(&format!("挂载成功，盘符 {}（{}）", drive, if writable { "可读写" } else { "只读" }));
 
     Ok(LanShareFsHost { host })
 }

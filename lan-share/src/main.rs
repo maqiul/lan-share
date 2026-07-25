@@ -328,12 +328,19 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         ..Default::default()
     };
 
-    // 账号验证器：将 LSP3 账号认证桥接到本地用户数据库（bcrypt 校验 + 权限映射）
+    // 账号验证器：将 LSP3 账号认证桥接到本地用户数据库（bcrypt 校验 + 细粒度权限映射）
     let db_for_lsp = db.clone();
     let account_verifier: AccountVerifier = Arc::new(move |username, password| {
-        db_for_lsp
-            .verify_login(username, password)
-            .map(|user| if user.can_write() { "readwrite".to_string() } else { "read".to_string() })
+        db_for_lsp.verify_login(username, password).map(|user| {
+            let mut perms = Vec::new();
+            if user.can_read() { perms.push("read"); }
+            if user.can_write() { perms.push("write"); }
+            if user.can_delete() { perms.push("delete"); }
+            if user.can_rename() { perms.push("rename"); }
+            if user.can_mkdir() { perms.push("mkdir"); }
+            if user.can_share() { perms.push("share"); }
+            perms.join(",")
+        })
     });
 
     let server = Arc::new(LspServer::new(config).with_account_verifier(account_verifier));

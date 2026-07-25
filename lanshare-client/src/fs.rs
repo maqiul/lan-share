@@ -1,24 +1,26 @@
-//! LanShare 只读文件系统 — WinFsp FileSystemContext 实现
+//! LanShare 文件系统 — WinFsp FileSystemContext 实现
 //!
 //! 将远程 LanShare 共享映射为本地盘符，支持：
-//! - 浏览目录结构
-//! - 读取文件内容
-//! - 查看文件属性（大小、修改时间）
+//! - 浏览目录结构、读取文件内容、查看文件属性
+//! - 创建/写入/删除/重命名文件与目录（需服务端授予 readwrite 权限）
 //!
-//! 不支持（只读）：创建、写入、删除、重命名
+//! 写入模型（写回缓存）：LSP3 写入为「整文件上传」语义，而 WinFsp 是随机写。
+//! 故以「写回缓存」桥接：以写方式打开文件时将远端内容下载到内存缓冲，
+//! 随机写/改大小均在缓冲上进行，句柄 cleanup 时将整个缓冲上传回服务端。
+//! 适用于 LAN 场景的中小文件；超大文件写入会占用相应内存。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use widestring::U16CStr;
 use windows::Win32::Foundation::{
-    STATUS_ACCESS_DENIED, STATUS_END_OF_FILE, STATUS_OBJECT_NAME_NOT_FOUND,
-    STATUS_OBJECT_PATH_NOT_FOUND,
+    STATUS_ACCESS_DENIED, STATUS_DIRECTORY_NOT_EMPTY, STATUS_END_OF_FILE,
+    STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
 };
 use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
 };
 use winfsp::filesystem::{
     DirInfo, DirMarker, FileInfo, FileSecurity, FileSystemContext, OpenFileInfo, VolumeInfo,
@@ -26,6 +28,16 @@ use winfsp::filesystem::{
 };
 
 use lanshare_client::lsp_client::{DirEntry, StatResp, LspShareClient};
+
+// ── Win32 常量（create_options / granted_access / cleanup flags）──
+/// create_options：目标为目录
+const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
+/// granted_access：写数据
+const FILE_WRITE_DATA: u32 = 0x0002;
+/// granted_access：追加数据
+const FILE_APPEND_DATA: u32 = 0x0004;
+/// cleanup flags：本次 cleanup 需完成删除
+const FSP_CLEANUP_DELETE: u32 = 0x01;
 
 /// 将 Unix 时间戳（秒）转为 Windows FILETIME（100ns since 1601）
 fn unix_to_filetime(secs: u64) -> u64 {
@@ -55,6 +67,18 @@ pub struct LanShareHandle {
     is_dir: bool,
     size: u64,
     mtime: u64,
+    /// 写回缓冲（仅以写方式打开的文件句柄为 Some）：随机写在内存进行，cleanup 时整文件上传。
+    /// 其存在与否即代表本句柄是否可写。
+    write_buf: Option<Arc<Mutex<WriteBuf>>>,
+    /// 删除标记：set_delete(true) 后置位，cleanup 时真正删除
+    delete_on_close: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// 写回缓冲：内存中的文件内容 + 脏标记
+#[derive(Debug)]
+struct WriteBuf {
+    data: Vec<u8>,
+    dirty: bool,
 }
 
 /// 目录缓存条目
@@ -69,9 +93,11 @@ struct FileCacheEntry {
     last_access: std::sync::atomic::AtomicU64,
 }
 
-/// LanShare 只读文件系统上下文
+/// LanShare 文件系统上下文
 pub struct LanShareFs {
     client: Arc<LspShareClient>,
+    /// 卷是否可写（服务端授予任一写类权限）。只读时拒绝一切写操作，卷以只读挂载。
+    writable: bool,
     /// 目录缓存：路径 → 条目列表（TTL 5 秒）
     dir_cache: RwLock<HashMap<String, DirCacheEntry>>,
     /// 文件内容缓存：路径 → 数据（LRU 淘汰）
@@ -90,8 +116,10 @@ const FILE_CACHE_MAX_FILE: usize = 16 * 1024 * 1024;
 
 impl LanShareFs {
     pub fn new(client: Arc<LspShareClient>) -> Self {
+        let writable = client.is_writable();
         Self {
             client,
+            writable,
             dir_cache: RwLock::new(HashMap::new()),
             file_cache: RwLock::new(HashMap::new()),
             next_index: std::sync::atomic::AtomicU64::new(1),
@@ -121,7 +149,7 @@ impl LanShareFs {
         let attrs = if stat.is_dir {
             FILE_ATTRIBUTE_DIRECTORY.0
         } else {
-            FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_NORMAL.0
+            FILE_ATTRIBUTE_NORMAL.0
         };
         FileInfo {
             file_attributes: attrs,
@@ -221,15 +249,16 @@ impl LanShareFs {
         }
     }
 
-    /// 构建默认安全描述符（所有人只读）
+    /// 构建默认安全描述符（所有人可读可写可删除）
     fn default_security_descriptor() -> Vec<u8> {
-        // SDDL: O:BAG:BAD:P(A;;FR;;;WD) — 所有人只读
+        // SDDL: 所有人可读可写可删除（0x1201FF = FILE_GENERIC_READ|WRITE|DELETE|READ_CONTROL|SYNCHRONIZE）。
+        // 写权限的实际门控由服务端会话权限 + 本卷 writable 标志负责，此处仅放开本地 ACL 限制。
         // 使用 Win32 API 转换
         use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
         use windows::Win32::Security::{GetSecurityDescriptorLength, PSECURITY_DESCRIPTOR};
         use windows::core::PCWSTR;
 
-        let sddl = "O:BAG:BAD:P(A;;FR;;;WD)";
+        let sddl = "O:BAG:BAD:P(A;;0x1201FF;;;WD)";
         let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         let mut size = 0u32;
@@ -260,6 +289,32 @@ impl LanShareFs {
 
         bytes
     }
+
+    /// 取路径的父目录（"/a/b.txt" → "/a"；"/a" → "/"）
+    fn parent_dir(path: &str) -> &str {
+        let trimmed = path.trim_end_matches('/');
+        match trimmed.rfind('/') {
+            Some(0) => "/",
+            Some(i) => &trimmed[..i],
+            None => "/",
+        }
+    }
+
+    /// 使指定目录的缓存失效
+    fn invalidate_dir(&self, path: &str) {
+        self.dir_cache.write().remove(path);
+    }
+
+    /// 使指定路径所在父目录的缓存失效
+    fn invalidate_dir_parent(&self, path: &str) {
+        let parent = Self::parent_dir(path).to_string();
+        self.dir_cache.write().remove(&parent);
+    }
+
+    /// 使指定文件的缓存失效
+    fn invalidate_file(&self, path: &str) {
+        self.file_cache.write().remove(path);
+    }
 }
 
 impl FileSystemContext for LanShareFs {
@@ -288,14 +343,15 @@ impl FileSystemContext for LanShareFs {
             })?
         };
 
-        if !stat.exists {
-            return Err(winfsp::FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND.0));
-        }
-
         let attributes = if stat.is_dir {
             FILE_ATTRIBUTE_DIRECTORY.0
+        } else if stat.exists {
+            FILE_ATTRIBUTE_NORMAL.0
+        } else if self.writable {
+            // 文件不存在但卷可写：返回普通文件属性，允许后续 create/overwrite
+            FILE_ATTRIBUTE_NORMAL.0
         } else {
-            FILE_ATTRIBUTE_READONLY.0
+            return Err(winfsp::FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND.0));
         };
 
         let sd = Self::default_security_descriptor();
@@ -324,7 +380,7 @@ impl FileSystemContext for LanShareFs {
         &self,
         file_name: &U16CStr,
         _create_options: u32,
-        _granted_access: u32,
+        granted_access: u32,
         file_info: &mut OpenFileInfo,
     ) -> winfsp::Result<Self::FileContext> {
         let path = Self::to_wsp_path(file_name);
@@ -350,12 +406,128 @@ impl FileSystemContext for LanShareFs {
         let fi = self.stat_to_fileinfo(&stat);
         *file_info.as_mut() = fi;
 
+        // 以写方式打开文件（卷可写 + 非目录 + granted_access 含写权限）时，
+        // 下载远端内容到写回缓冲，随机写在内存进行，cleanup 时整文件上传。
+        let can_write = self.client.can("write")
+            && !stat.is_dir
+            && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
+        let write_buf = if can_write {
+            let data = self
+                .client
+                .download(&path, 0)
+                .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+            Some(Arc::new(Mutex::new(WriteBuf { data, dirty: false })))
+        } else {
+            None
+        };
+
         Ok(LanShareHandle {
             path,
             is_dir: stat.is_dir,
             size: stat.size,
             mtime: parse_mtime(&stat.mtime),
+            write_buf,
+            delete_on_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
+    }
+
+    fn create(
+        &self,
+        file_name: &U16CStr,
+        create_options: u32,
+        _granted_access: u32,
+        _file_attributes: u32,
+        _security_descriptor: Option<&[std::ffi::c_void]>,
+        _allocation_size: u64,
+        _extra_buffer: Option<&[u8]>,
+        _extra_buffer_is_reparse_point: bool,
+        file_info: &mut OpenFileInfo,
+    ) -> winfsp::Result<Self::FileContext> {
+        let path = Self::to_wsp_path(file_name);
+
+        // 创建目录（需 mkdir 权限）
+        if create_options & FILE_DIRECTORY_FILE != 0 {
+            if !self.client.can("mkdir") {
+                return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
+            }
+            self.client
+                .mkdir(&path)
+                .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+            self.invalidate_dir_parent(&path);
+
+            let now = now_filetime();
+            let fi = file_info.as_mut();
+            fi.file_attributes = FILE_ATTRIBUTE_DIRECTORY.0;
+            fi.allocation_size = 0;
+            fi.file_size = 0;
+            fi.creation_time = now;
+            fi.last_access_time = now;
+            fi.last_write_time = now;
+            fi.change_time = now;
+            fi.index_number = self.next_index_number();
+
+            return Ok(LanShareHandle {
+                path,
+                is_dir: true,
+                size: 0,
+                mtime: now,
+                write_buf: None,
+                delete_on_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+        }
+
+        // 创建文件（需 write 权限）：建立空的脏写回缓冲，cleanup 时上传
+        if !self.client.can("write") {
+            return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
+        }
+        let now = now_filetime();
+        let fi = file_info.as_mut();
+        fi.file_attributes = FILE_ATTRIBUTE_NORMAL.0;
+        fi.allocation_size = 0;
+        fi.file_size = 0;
+        fi.creation_time = now;
+        fi.last_access_time = now;
+        fi.last_write_time = now;
+        fi.change_time = now;
+        fi.index_number = self.next_index_number();
+
+        Ok(LanShareHandle {
+            path,
+            is_dir: false,
+            size: 0,
+            mtime: now,
+            write_buf: Some(Arc::new(Mutex::new(WriteBuf {
+                data: Vec::new(),
+                dirty: true,
+            }))),
+            delete_on_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
+
+    fn overwrite(
+        &self,
+        context: &Self::FileContext,
+        _file_attributes: u32,
+        _replace_file_attributes: bool,
+        _allocation_size: u64,
+        _extra_buffer: Option<&[u8]>,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
+        if !self.client.can("write") {
+            return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
+        }
+        if let Some(ref wb) = context.write_buf {
+            let mut buf = wb.lock();
+            buf.data.clear();
+            buf.dirty = true;
+        }
+        let now = now_filetime();
+        file_info.file_attributes = FILE_ATTRIBUTE_NORMAL.0;
+        file_info.allocation_size = 0;
+        file_info.file_size = 0;
+        file_info.last_write_time = now;
+        file_info.change_time = now;
+        Ok(())
     }
 
     fn close(&self, _context: Self::FileContext) {
@@ -367,14 +539,20 @@ impl FileSystemContext for LanShareFs {
         context: &Self::FileContext,
         file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
+        // 有写回缓冲时以缓冲长度为准（写入后大小已变化）
+        let size = if let Some(ref wb) = context.write_buf {
+            wb.lock().data.len() as u64
+        } else {
+            context.size
+        };
         let attrs = if context.is_dir {
             FILE_ATTRIBUTE_DIRECTORY.0
         } else {
-            FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_NORMAL.0
+            FILE_ATTRIBUTE_NORMAL.0
         };
         file_info.file_attributes = attrs;
-        file_info.allocation_size = if context.is_dir { 0 } else { (context.size + 511) / 512 * 512 };
-        file_info.file_size = context.size;
+        file_info.allocation_size = if context.is_dir { 0 } else { (size + 511) / 512 * 512 };
+        file_info.file_size = size;
         file_info.creation_time = context.mtime;
         file_info.last_access_time = context.mtime;
         file_info.last_write_time = context.mtime;
@@ -392,6 +570,19 @@ impl FileSystemContext for LanShareFs {
         if context.is_dir {
             return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
         }
+
+        // 有写回缓冲时从缓冲读（含尚未上传的最新写入）
+        if let Some(ref wb) = context.write_buf {
+            let buf = wb.lock();
+            if (offset as usize) >= buf.data.len() {
+                return Err(winfsp::FspError::NTSTATUS(STATUS_END_OF_FILE.0));
+            }
+            let end = ((offset as usize) + buffer.len()).min(buf.data.len());
+            let len = end - offset as usize;
+            buffer[..len].copy_from_slice(&buf.data[offset as usize..end]);
+            return Ok(len as u32);
+        }
+
         if offset >= context.size {
             return Err(winfsp::FspError::NTSTATUS(STATUS_END_OF_FILE.0));
         }
@@ -480,7 +671,7 @@ impl FileSystemContext for LanShareFs {
             fi.file_attributes = if entry.is_dir {
                 FILE_ATTRIBUTE_DIRECTORY.0
             } else {
-                FILE_ATTRIBUTE_READONLY.0 | FILE_ATTRIBUTE_NORMAL.0
+                FILE_ATTRIBUTE_NORMAL.0
             };
             fi.allocation_size = if entry.is_dir { 0 } else { (entry.size + 511) / 512 * 512 };
             fi.file_size = entry.size;
@@ -501,6 +692,166 @@ impl FileSystemContext for LanShareFs {
 
         DirInfo::<255>::finalize_buffer(buffer, &mut cursor);
         Ok(cursor)
+    }
+
+    fn write(
+        &self,
+        context: &Self::FileContext,
+        buffer: &[u8],
+        offset: u64,
+        write_to_eof: bool,
+        constrained_io: bool,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<u32> {
+        let wb = context
+            .write_buf
+            .as_ref()
+            .ok_or_else(|| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+        let mut buf = wb.lock();
+
+        // 确定写入偏移：write_to_eof 表示追加到末尾
+        let off = if write_to_eof {
+            buf.data.len() as u64
+        } else {
+            offset
+        };
+
+        // constrained_io：不得超出当前文件长度（缓存 IO）
+        let data = if constrained_io {
+            let cur_len = buf.data.len() as u64;
+            if off >= cur_len {
+                return Ok(0);
+            }
+            let max = (cur_len - off) as usize;
+            &buffer[..buffer.len().min(max)]
+        } else {
+            buffer
+        };
+
+        let end = off as usize + data.len();
+        if end > buf.data.len() {
+            buf.data.resize(end, 0);
+        }
+        buf.data[off as usize..end].copy_from_slice(data);
+        buf.dirty = true;
+
+        let now = now_filetime();
+        let new_size = buf.data.len() as u64;
+        file_info.file_size = new_size;
+        file_info.allocation_size = (new_size + 511) / 512 * 512;
+        file_info.last_write_time = now;
+        file_info.change_time = now;
+
+        Ok(data.len() as u32)
+    }
+
+    fn set_file_size(
+        &self,
+        context: &Self::FileContext,
+        new_size: u64,
+        set_allocation_size: bool,
+        file_info: &mut FileInfo,
+    ) -> winfsp::Result<()> {
+        let wb = context
+            .write_buf
+            .as_ref()
+            .ok_or_else(|| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+        if set_allocation_size {
+            // 仅调整分配大小，不改动数据
+            file_info.allocation_size = new_size;
+        } else {
+            let mut buf = wb.lock();
+            buf.data.resize(new_size as usize, 0);
+            buf.dirty = true;
+            file_info.file_size = new_size;
+            file_info.allocation_size = (new_size + 511) / 512 * 512;
+            let now = now_filetime();
+            file_info.last_write_time = now;
+            file_info.change_time = now;
+        }
+        Ok(())
+    }
+
+    fn set_delete(
+        &self,
+        context: &Self::FileContext,
+        _file_name: &U16CStr,
+        delete_file: bool,
+    ) -> winfsp::Result<()> {
+        if !self.client.can("delete") {
+            return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
+        }
+        if !delete_file {
+            // 取消删除标记
+            context
+                .delete_on_close
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+        // 目录非空时拒绝删除
+        if context.is_dir {
+            let entries = self
+                .client
+                .list_dir(&context.path)
+                .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+            if !entries.is_empty() {
+                return Err(winfsp::FspError::NTSTATUS(STATUS_DIRECTORY_NOT_EMPTY.0));
+            }
+        }
+        // 仅置标记，真正删除在 cleanup（FspCleanupDelete）时执行
+        context
+            .delete_on_close
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn rename(
+        &self,
+        context: &Self::FileContext,
+        _file_name: &U16CStr,
+        new_file_name: &U16CStr,
+        _replace_if_exists: bool,
+    ) -> winfsp::Result<()> {
+        if !self.client.can("rename") {
+            return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
+        }
+        let new_path = Self::to_wsp_path(new_file_name);
+        let old_path = context.path.clone();
+        self.client
+            .rename(&old_path, &new_path)
+            .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+        // 失效新旧两个父目录的缓存
+        self.invalidate_dir_parent(&old_path);
+        self.invalidate_dir_parent(&new_path);
+        Ok(())
+    }
+
+    fn cleanup(&self, context: &Self::FileContext, _file_name: Option<&U16CStr>, flags: u32) {
+        // 删除：set_delete(true) 或 FILE_DELETE_ON_CLOSE 触发
+        if flags & FSP_CLEANUP_DELETE != 0
+            || context.delete_on_close.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            let _ = self.client.delete(&context.path, context.is_dir);
+            if context.is_dir {
+                self.invalidate_dir(&context.path);
+            } else {
+                self.invalidate_file(&context.path);
+            }
+            self.invalidate_dir_parent(&context.path);
+            return;
+        }
+
+        // 写回：脏缓冲整文件上传
+        if let Some(ref wb) = context.write_buf {
+            let mut buf = wb.lock();
+            if buf.dirty {
+                if self.client.upload_data(&context.path, &buf.data).is_ok() {
+                    buf.dirty = false;
+                    self.invalidate_file(&context.path);
+                    self.invalidate_dir_parent(&context.path);
+                }
+            }
+        }
     }
 
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
@@ -533,9 +884,27 @@ impl FileSystemContext for LanShareFs {
 
     fn flush(
         &self,
-        _context: Option<&Self::FileContext>,
-        _file_info: &mut FileInfo,
+        context: Option<&Self::FileContext>,
+        file_info: &mut FileInfo,
     ) -> winfsp::Result<()> {
-        Ok(()) // 只读，无需 flush
+        // 文件 flush：脏写回缓冲立即上传
+        if let Some(ctx) = context {
+            if let Some(ref wb) = ctx.write_buf {
+                let mut buf = wb.lock();
+                if buf.dirty {
+                    self.client
+                        .upload_data(&ctx.path, &buf.data)
+                        .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+                    buf.dirty = false;
+                    let now = now_filetime();
+                    let size = buf.data.len() as u64;
+                    file_info.file_size = size;
+                    file_info.allocation_size = (size + 511) / 512 * 512;
+                    file_info.last_write_time = now;
+                    file_info.change_time = now;
+                }
+            }
+        }
+        Ok(())
     }
 }
