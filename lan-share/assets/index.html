@@ -2002,18 +2002,18 @@ async function loadSettings(){
       document.getElementById('setWebPort').value = cfg.web_port || 8080;
       document.getElementById('setDeviceName').value = cfg.device_name || '';
       document.getElementById('setSharedDir').value = cfg.shared_dir || '';
-      document.getElementById('setAutoBrowser').checked = cfg.auto_browser !== false;
-      document.getElementById('setSimpleMode').checked = cfg.simple_mode !== 'false';
+      document.getElementById('setAutoBrowser').checked = cfg.auto_browser !== false && cfg.auto_browser !== 'false';
+      document.getElementById('setSimpleMode').checked = cfg.simple_mode !== 'false' && cfg.simple_mode !== false;
       document.getElementById('setPin').value = cfg.pin || '';
       updatePinRowVisibility();
       // 快照原始值
       _origAdminCfg = {
-        lsp_port: cfg.lsp_port || 12345,
-        web_port: cfg.web_port || 8080,
+        lsp_port: parseInt(cfg.lsp_port) || 12345,
+        web_port: parseInt(cfg.web_port) || 8080,
         device_name: cfg.device_name || '',
         shared_dir: cfg.shared_dir || '',
-        auto_browser: cfg.auto_browser !== false,
-        simple_mode: cfg.simple_mode !== 'false',
+        auto_browser: cfg.auto_browser !== false && cfg.auto_browser !== 'false',
+        simple_mode: cfg.simple_mode !== 'false' && cfg.simple_mode !== false,
         pin: cfg.pin || '',
       };
     }
