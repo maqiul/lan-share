@@ -269,6 +269,21 @@ impl LspShareClient {
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
         self.rt.block_on(self.with_retry(|c| async move { c.rename(old_path, new_path).await }))
     }
+
+    /// 请求文件锁（exclusive / shared），TTL 秒后自动过期。
+    /// 服务端拒绝时返回 Err（文件已被其他客户端锁定）。
+    pub fn lock_file(&self, path: &str, mode: &str, ttl_secs: u32) -> Result<(), String> {
+        self.rt.block_on(self.with_retry(|c| async move {
+            c.lock_file(path, mode, ttl_secs).await
+        }))
+    }
+
+    /// 释放文件锁
+    pub fn unlock_file(&self, path: &str) -> Result<(), String> {
+        self.rt.block_on(self.with_retry(|c| async move {
+            c.unlock_file(path).await
+        }))
+    }
 }
 
 /// 提取路径的最后一段作为文件名

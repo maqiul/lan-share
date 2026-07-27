@@ -25,6 +25,7 @@ toml = "0.8"
 widestring = "1"
 parking_lot = "0.12"
 base64 = "0.22"
+winreg = "0.55"
 
 [target.'cfg(windows)'.dependencies]
 winfsp = { version = "0.13", features = ["full", "windows-61"] }

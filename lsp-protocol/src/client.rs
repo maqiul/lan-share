@@ -1134,4 +1134,74 @@ impl LspClient {
         info!("Sent GOODBYE");
         Ok(())
     }
+
+    /// 请求文件锁
+    ///
+    /// mode: "exclusive"（排他，写用）或 "shared"（共享，读用）
+    /// ttl: 锁超时秒数，过期后服务端自动释放
+    pub async fn lock_file(&self, path: &str, mode: &str, ttl: u32) -> Result<()> {
+        let (stream_id, mut rx) = self
+            .open_stream("file_lock", serde_json::json!({ "path": path }))
+            .await?;
+
+        let payload = FileLockPayload {
+            path: path.to_string(),
+            mode: mode.to_string(),
+            ttl,
+        };
+
+        let frame = Frame::new(
+            FrameType::FileLock,
+            stream_id,
+            1,
+            Bytes::from(serde_json::to_vec(&payload)?),
+        );
+
+        self.send_frame(frame).await?;
+
+        let resp = Self::recv_on_stream(&mut rx).await?;
+        if resp.frame_type == FrameType::Error {
+            let err: ErrorPayload = serde_json::from_slice(&resp.payload)?;
+            self.close_stream(stream_id).await?;
+            return Err(LspError::Transfer(err.message));
+        }
+
+        self.close_stream(stream_id).await?;
+        debug!("File locked: {} ({})", path, mode);
+        Ok(())
+    }
+
+    /// 释放文件锁
+    pub async fn unlock_file(&self, path: &str) -> Result<()> {
+        let (stream_id, mut rx) = self
+            .open_stream("file_unlock", serde_json::json!({ "path": path }))
+            .await?;
+
+        // 复用 FileLockPayload，mode = "unlock" 表示释放
+        let payload = FileLockPayload {
+            path: path.to_string(),
+            mode: "unlock".to_string(),
+            ttl: 0,
+        };
+
+        let frame = Frame::new(
+            FrameType::FileLock,
+            stream_id,
+            1,
+            Bytes::from(serde_json::to_vec(&payload)?),
+        );
+
+        self.send_frame(frame).await?;
+
+        let resp = Self::recv_on_stream(&mut rx).await?;
+        if resp.frame_type == FrameType::Error {
+            let err: ErrorPayload = serde_json::from_slice(&resp.payload)?;
+            self.close_stream(stream_id).await?;
+            return Err(LspError::Transfer(err.message));
+        }
+
+        self.close_stream(stream_id).await?;
+        debug!("File unlocked: {}", path);
+        Ok(())
+    }
 }

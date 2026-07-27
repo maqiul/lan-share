@@ -340,6 +340,9 @@ impl LspServer {
                 FrameType::Keepalive => {
                     vec![Frame::new(FrameType::KeepaliveAck, 0, 0, Bytes::new())]
                 }
+                FrameType::FileLock => {
+                    Self::handle_file_lock(&frame, &session_id, file_locks).await?
+                }
                 FrameType::Goodbye => {
                     info!("Client {} sent GOODBYE", peer_addr);
                     break;
@@ -813,6 +816,66 @@ impl LspServer {
         // 清理 stream 映射
         write_streams.remove(&frame.stream_id);
 
+        let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
+        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
+            Bytes::from(serde_json::to_vec(&ack)?))])
+    }
+
+    /// 文件锁管理：exclusive/shared 加锁，unlock 释放，TTL 自动过期
+    async fn handle_file_lock(
+        frame: &Frame, session_id: &str,
+        file_locks: &Arc<RwLock<HashMap<String, FileLock>>>,
+    ) -> Result<Vec<Frame>> {
+        let payload: FileLockPayload = serde_json::from_slice(&frame.payload)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // 释放锁
+        if payload.mode == "unlock" {
+            let mut locks = file_locks.write().await;
+            if let Some(lock) = locks.get(&payload.path) {
+                if lock.session_id == *session_id {
+                    locks.remove(&payload.path);
+                    info!("File unlocked: {} by {}", payload.path, session_id);
+                }
+            }
+            let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
+            return Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
+                Bytes::from(serde_json::to_vec(&ack)?))]);
+        }
+
+        // 加锁：先清理过期锁
+        {
+            let mut locks = file_locks.write().await;
+            locks.retain(|_, l| l.expires_at > now);
+
+            // 检查是否已被其他会话锁定
+            if let Some(existing) = locks.get(&payload.path) {
+                if existing.session_id != *session_id {
+                    let err = ErrorPayload {
+                        code: 0x08,
+                        message: format!("File is locked by another client (expires in {}s)",
+                            existing.expires_at - now),
+                        stream_id: Some(frame.stream_id),
+                    };
+                    return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, frame.seq_num,
+                        Bytes::from(serde_json::to_vec(&err)?))]);
+                }
+            }
+
+            // 加锁 / 续期
+            let ttl = if payload.ttl == 0 { 30 } else { payload.ttl };
+            locks.insert(payload.path.clone(), FileLock {
+                path: payload.path.clone(),
+                session_id: session_id.to_string(),
+                mode: payload.mode.clone(),
+                expires_at: now + ttl as i64,
+            });
+        }
+
+        info!("File locked: {} ({}) by {}", payload.path, payload.mode, session_id);
         let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
         Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
             Bytes::from(serde_json::to_vec(&ack)?))])

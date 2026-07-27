@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
@@ -72,6 +73,8 @@ pub struct LanShareHandle {
     write_buf: Option<Arc<Mutex<WriteBuf>>>,
     /// 删除标记：set_delete(true) 后置位，cleanup 时真正删除
     delete_on_close: Arc<std::sync::atomic::AtomicBool>,
+    /// 是否持有服务端文件锁（写打开时获取 exclusive lock，cleanup 时释放）
+    holds_lock: bool,
 }
 
 /// 写回缓冲：内存中的文件内容 + 脏标记
@@ -106,6 +109,8 @@ pub struct LanShareFs {
     next_index: std::sync::atomic::AtomicU64,
     /// 缓存访问序号（用于 LRU）
     cache_seq: std::sync::atomic::AtomicU64,
+    /// 正在进行的写回上传计数（优雅退出时等待归零）
+    pending_writes: Arc<AtomicUsize>,
 }
 
 const DIR_CACHE_TTL_SECS: u64 = 5;
@@ -113,6 +118,9 @@ const DIR_CACHE_TTL_SECS: u64 = 5;
 const FILE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 /// 单个文件超过此大小则不缓存（16 MB），避免大文件撑爆内存
 const FILE_CACHE_MAX_FILE: usize = 16 * 1024 * 1024;
+/// 写回缓冲单文件上限（512 MB）：超过此大小的文件以只读方式打开，
+/// 防止内存耗尽（OOM）。用户需通过 Web 端或分块工具上传超大文件。
+const MAX_WRITE_BUF_SIZE: u64 = 512 * 1024 * 1024;
 
 impl LanShareFs {
     pub fn new(client: Arc<LspShareClient>) -> Self {
@@ -124,7 +132,13 @@ impl LanShareFs {
             file_cache: RwLock::new(HashMap::new()),
             next_index: std::sync::atomic::AtomicU64::new(1),
             cache_seq: std::sync::atomic::AtomicU64::new(0),
+            pending_writes: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// 获取 pending_writes 计数器的 Arc 引用（供外部监控）
+    pub fn pending_writes_handle(&self) -> Arc<AtomicUsize> {
+        self.pending_writes.clone()
     }
 
     fn next_index_number(&self) -> u64 {
@@ -408,9 +422,20 @@ impl FileSystemContext for LanShareFs {
 
         // 以写方式打开文件（卷可写 + 非目录 + granted_access 含写权限）时，
         // 下载远端内容到写回缓冲，随机写在内存进行，cleanup 时整文件上传。
+        // 大文件保护：超过 MAX_WRITE_BUF_SIZE 的文件以只读方式打开，防止 OOM。
         let can_write = self.client.can("write")
             && !stat.is_dir
-            && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0;
+            && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0
+            && stat.size <= MAX_WRITE_BUF_SIZE;
+        if self.client.can("write") && !stat.is_dir
+            && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0
+            && stat.size > MAX_WRITE_BUF_SIZE
+        {
+            crate::log(&format!(
+                "大文件保护：{} ({} MB) 超过写回上限，以只读打开",
+                path, stat.size / 1024 / 1024
+            ));
+        }
         let write_buf = if can_write {
             let data = self
                 .client
@@ -421,6 +446,20 @@ impl FileSystemContext for LanShareFs {
             None
         };
 
+        // 写打开时尝试获取服务端文件锁（多客户端冲突协调）
+        // 锁失败不阻止打开（服务端 write_req 会再次检查），仅记录日志
+        let holds_lock = if write_buf.is_some() {
+            match self.client.lock_file(&path, "exclusive", 60) {
+                Ok(_) => true,
+                Err(e) => {
+                    crate::log(&format!("文件锁获取失败({}): {}", path, e));
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
         Ok(LanShareHandle {
             path,
             is_dir: stat.is_dir,
@@ -428,6 +467,7 @@ impl FileSystemContext for LanShareFs {
             mtime: parse_mtime(&stat.mtime),
             write_buf,
             delete_on_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            holds_lock,
         })
     }
 
@@ -473,6 +513,7 @@ impl FileSystemContext for LanShareFs {
                 mtime: now,
                 write_buf: None,
                 delete_on_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                holds_lock: false,
             });
         }
 
@@ -501,6 +542,7 @@ impl FileSystemContext for LanShareFs {
                 dirty: true,
             }))),
             delete_on_close: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            holds_lock: false,
         })
     }
 
@@ -841,16 +883,27 @@ impl FileSystemContext for LanShareFs {
             return;
         }
 
-        // 写回：脏缓冲整文件上传
+        // 写回：脏缓冲整文件上传（追踪 pending 计数，供优雅退出等待）
         if let Some(ref wb) = context.write_buf {
             let mut buf = wb.lock();
             if buf.dirty {
-                if self.client.upload_data(&context.path, &buf.data).is_ok() {
+                self.pending_writes.fetch_add(1, Ordering::AcqRel);
+                let result = self.client.upload_data(&context.path, &buf.data);
+                self.pending_writes.fetch_sub(1, Ordering::AcqRel);
+                if result.is_ok() {
                     buf.dirty = false;
                     self.invalidate_file(&context.path);
                     self.invalidate_dir_parent(&context.path);
+                    crate::log(&format!("写回完成: {}", context.path));
+                } else {
+                    crate::log(&format!("写回失败: {} - {:?}", context.path, result.err()));
                 }
             }
+        }
+
+        // 释放服务端文件锁
+        if context.holds_lock {
+            let _ = self.client.unlock_file(&context.path);
         }
     }
 

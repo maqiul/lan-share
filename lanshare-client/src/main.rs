@@ -566,6 +566,58 @@ fn hide_console() {
 }
 
 // ══════════════════════════════════════════════
+//  开机自启动（注册表 Run 键）
+// ══════════════════════════════════════════════
+
+const AUTOSTART_REG_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const AUTOSTART_VALUE_NAME: &str = "LanShareClient";
+
+/// 检查是否已启用开机自启动
+pub(crate) fn is_autostart_enabled() -> bool {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    match hkcu.open_subkey(AUTOSTART_REG_KEY) {
+        Ok(run) => run.get_value::<String, _>(AUTOSTART_VALUE_NAME).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// 设置/取消开机自启动
+pub(crate) fn set_autostart(enable: bool) {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if enable {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Ok(run) = hkcu.create_subkey(AUTOSTART_REG_KEY) {
+                let cmd = format!("\"{}\"", exe.display());
+                let _ = run.0.set_value(AUTOSTART_VALUE_NAME, &cmd);
+                log(&format!("开机自启动已开启: {}", cmd));
+            }
+        }
+    } else {
+        if let Ok(run) = hkcu.open_subkey_with_flags(AUTOSTART_REG_KEY, KEY_SET_VALUE) {
+            let _ = run.delete_value(AUTOSTART_VALUE_NAME);
+            log("开机自启动已关闭");
+        }
+    }
+}
+
+/// 获取本机主要 IP 地址（用于网络变化检测）
+fn get_local_ip() -> String {
+    use std::net::UdpSocket;
+    // 连接外部地址（不实际发包）获取本机出口 IP
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("223.5.5.5:53")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "0.0.0.0".to_string())
+}
+
+// ══════════════════════════════════════════════
 //  日志（写入 exe 同目录 lanshare-client.log，FreeConsole 后仍可排查）
 // ══════════════════════════════════════════════
 
@@ -833,7 +885,10 @@ fn main() {
     let (drive_tx, drive_rx) = std::sync::mpsc::channel::<String>();
     // client_tx 回传 LSP 客户端句柄，供托盘显示连接状态与手动重连
     let (client_tx, client_rx) = std::sync::mpsc::channel::<Arc<LspShareClient>>();
-    let shared = Arc::new(Mutex::new(Some((server, auth, mount, label, drive_tx, client_tx))));
+    // pending_tx 回传写回计数器句柄，供托盘显示同步状态与优雅退出
+    let (pending_tx, pending_rx) =
+        std::sync::mpsc::channel::<Arc<std::sync::atomic::AtomicUsize>>();
+    let shared = Arc::new(Mutex::new(Some((server, auth, mount, label, drive_tx, client_tx, pending_tx))));
 
     let init = winfsp_init_or_die();
 
@@ -843,12 +898,12 @@ fn main() {
 
     let mut fsp = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let (server, auth, mount, label, drive_tx, client_tx) = shared
+            let (server, auth, mount, label, drive_tx, client_tx, pending_tx) = shared
                 .lock()
                 .unwrap()
                 .take()
                 .expect("配置已被消费");
-            svc_start(&server, &auth, &mount, &label, drive_tx, client_tx)
+            svc_start(&server, &auth, &mount, &label, drive_tx, client_tx, pending_tx)
         })
         .with_stop(move |fs| {
             svc_stop(fs);
@@ -865,12 +920,42 @@ fn main() {
         Ok(drive) => {
             // 接收 LSP 客户端句柄（用于托盘状态显示与手动重连）
             let client_handle = client_rx.recv().ok();
-            // 后台健康探测：周期刷新连接状态，服务端异常时经由 with_retry 自动重连
+            // 获取 pending_writes 句柄（供托盘显示同步状态 + 优雅退出）
+            let pending_writes_handle = pending_rx.recv().ok();
+            // 后台健康探测 + 网络变化检测：
+            // - 周期探测连接状态（服务端异常时经由 with_retry 自动重连）
+            // - 检测本机 IP 变化（网络切换/重连）时立即强制重连
             if let Some(ref c) = client_handle {
                 let probe_client = c.clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(Duration::from_secs(5));
-                    probe_client.probe();
+                std::thread::spawn(move || {
+                    let mut last_ip = get_local_ip();
+                    let mut was_healthy = true;
+                    loop {
+                        // 健康时 5s 探测，不健康时 2s 加速重试
+                        let interval = if probe_client.is_healthy() { 5 } else { 2 };
+                        std::thread::sleep(Duration::from_secs(interval));
+
+                        // 网络变化检测：本机 IP 变了则立即重连
+                        let cur_ip = get_local_ip();
+                        if cur_ip != last_ip {
+                            log(&format!("网络变化: {} -> {}，触发重连", last_ip, cur_ip));
+                            last_ip = cur_ip.clone();
+                            let _ = probe_client.force_reconnect();
+                            tray::show_balloon("LanShare", "网络变化，已重新连接", false);
+                            continue;
+                        }
+
+                        // 常规探测
+                        let healthy = probe_client.probe();
+                        if healthy && !was_healthy {
+                            log("连接已恢复");
+                            tray::show_balloon("LanShare", "连接已恢复", false);
+                        } else if !healthy && was_healthy {
+                            log("连接断开，尝试重连...");
+                            tray::show_balloon("LanShare", "连接断开，正在重连...", true);
+                        }
+                        was_healthy = healthy;
+                    }
                 });
             }
             // 让用户看到挂载成功提示，随后隐藏控制台
@@ -878,9 +963,8 @@ fn main() {
             #[cfg(windows)]
             hide_console();
             // 主线程运行托盘（阻塞，直到用户选择退出）
-            tray::run_tray(drive, client_handle);
+            tray::run_tray(drive, client_handle, pending_writes_handle);
             // 优雅停止 WinFsp 服务（触发 svc_stop 卸载盘符）。
-            // stop 仅向服务循环发停止信号、立即返回，真正的卸载在工作线程中进行。
             log("用户退出，发送停止信号");
             fsp.stop();
         }
@@ -925,6 +1009,7 @@ fn svc_start(
     label: &str,
     drive_tx: std::sync::mpsc::Sender<String>,
     client_tx: std::sync::mpsc::Sender<Arc<LspShareClient>>,
+    pending_tx: std::sync::mpsc::Sender<Arc<std::sync::atomic::AtomicUsize>>,
 ) -> Result<LanShareFsHost, FspError> {
     println!("  🌐 连接 {} ...", server);
     let client = LspShareClient::connect(server, auth.clone()).map_err(|e| {
@@ -944,6 +1029,8 @@ fn svc_start(
     // 回传客户端句柄供托盘使用（状态显示 + 手动重连）
     let _ = client_tx.send(client.clone());
     let context = LanShareFs::new(client);
+    // 回传写回计数器句柄供托盘使用（同步状态 + 优雅退出）
+    let _ = pending_tx.send(context.pending_writes_handle());
 
     let mut volume_params = VolumeParams::new();
     volume_params
