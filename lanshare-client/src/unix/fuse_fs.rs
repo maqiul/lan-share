@@ -526,7 +526,7 @@ impl Filesystem for LanShareFuse {
         reply.created(&ATTR_TTL, &attr, 0, fh, 0);
     }
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, mode: u32, reply: ReplyEntry) {
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
         let _ = mode;
         if !self.client.can("mkdir") {
             return reply.error(libc::EACCES);
@@ -664,11 +664,46 @@ impl Filesystem for LanShareFuse {
         );
     }
 
-    fn truncate(&mut self, _req: &Request, ino: u64, size: u64, reply: ReplyEmpty) {
+    fn setattr(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<std::time::SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<std::time::SystemTime>,
+        _chgtime: Option<std::time::SystemTime>,
+        _bkuptime: Option<std::time::SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // 只处理 truncate（size 变更）
+        let Some(new_size) = size else {
+            // 无 size 变更，返回当前属性
+            let path = {
+                let table = self.table.read();
+                match table.path_of(ino) {
+                    Some(p) => p.to_string(),
+                    None => return reply.error(libc::ENOENT),
+                }
+            };
+            let (is_dir, file_size) = match self.client.stat(&path) {
+                Ok(e) => (e.is_dir, e.size),
+                Err(_) => return reply.error(libc::EIO),
+            };
+            let attr = self.make_attr(ino, is_dir, file_size, "0");
+            return reply.attr(&ATTR_TTL, &attr);
+        };
+
         if !self.client.can("write") {
             return reply.error(libc::EACCES);
         }
-        if size > MAX_WRITE_BUF_SIZE {
+        if new_size > MAX_WRITE_BUF_SIZE {
             return reply.error(libc::ENOSPC);
         }
 
@@ -685,9 +720,12 @@ impl Filesystem for LanShareFuse {
             Ok(d) => d,
             Err(_) => return reply.error(libc::EIO),
         };
-        data.resize(size as usize, 0);
+        data.resize(new_size as usize, 0);
         match self.client.upload_data(&path, &data) {
-            Ok(()) => reply.ok(),
+            Ok(_) => {
+                let attr = self.make_attr(ino, false, new_size, "0");
+                reply.attr(&ATTR_TTL, &attr);
+            }
             Err(_) => reply.error(libc::EIO),
         }
     }
