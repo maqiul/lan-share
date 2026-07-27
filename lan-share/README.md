@@ -218,9 +218,9 @@ lan-share serve -d E:\media -p 18090 --web-port 18091
 
 ### GUI 模式（双击启动）
 
-直接双击 `lan-share`（不带参数），自动读取同目录 `lanshare.toml` 配置，启动后自动打开浏览器。
-- Windows：托盘常驻，右键托盘图标可退出
-- Linux/macOS：前台运行，Ctrl+C 停止
+直接双击 `lan-share`（不带参数），自动读取同目录 `lanshare.toml` 配置，启动后自动打开浏览器、托盘常驻。
+- Windows / macOS：系统托盘图标，右键可退出
+- Linux：桌面环境托盘（StatusNotifier），无桌面时前台运行 Ctrl+C 停止
 
 ---
 

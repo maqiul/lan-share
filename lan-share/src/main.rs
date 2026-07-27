@@ -306,9 +306,6 @@ async fn connect_and_auth(addr: &str, pin: &str) -> Result<LspClient, Box<dyn st
 }
 
 async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, web_port: u16, auto_browser: bool, with_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(not(windows))]
-    let _ = with_tray; // 非 Windows 无托盘
-
     let device_name = name.unwrap_or_else(|| {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -433,8 +430,7 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
             });
         }
 
-        // 系统托盘常驻（仅 Windows，_tray 持有到函数结束避免图标销毁）
-        #[cfg(windows)]
+        // 系统托盘常驻（_tray 持有到函数结束避免图标销毁）
         let _tray = if with_tray {
             let url = format!("http://127.0.0.1:{}", web_port);
             match setup_tray(&url) {
@@ -481,16 +477,12 @@ async fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Web 界面: 已禁用");
     }
     println!();
+    println!("  提示: 浏览器将自动打开；服务在托盘后台常驻");
+    println!("        右键托盘图标可打开界面 / 退出");
     #[cfg(windows)]
-    {
-        println!("  提示: 浏览器将自动打开；服务在托盘后台常驻");
-        println!("        右键托盘图标可打开界面 / 退出");
-        println!("        关闭本窗口将停止服务");
-    }
+    println!("        关闭本窗口将停止服务");
     #[cfg(not(windows))]
-    {
-        println!("  提示: 浏览器将自动打开；Ctrl+C 停止服务");
-    }
+    println!("        Ctrl+C 停止服务");
     println!();
     run_server(cfg.lsp_port, name, shared_dir, cfg.pin.clone(), cfg.web_port, cfg.auto_browser, true).await
 }
@@ -505,30 +497,47 @@ fn open_browser(url: &str) {
     { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
 }
 
-/// 创建系统托盘图标（含「打开界面」「退出」菜单，仅 Windows）
-#[cfg(windows)]
+/// 创建系统托盘图标（含「打开界面」「退出」菜单，跨平台）
 fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Error>> {
     use tray_item::{IconSource, TrayItem};
 
-    // 运行时生成图标字节 → CreateIconFromResourceEx 得到 HICON（无需外部 ico 文件）
-    // 注意：该 API 需要图标「资源数据」（BITMAPINFOHEADER 起），须跳过 ICO 文件的 22 字节头（ICONDIR+ICONDIRENTRY）
-    let icon_bytes = generate_icon_bytes();
-    let res_data = &icon_bytes[22..];
-    let hicon = unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::CreateIconFromResourceEx(
-            res_data.as_ptr(),
-            res_data.len() as u32,
-            1,          // fIcon = TRUE
-            0x00030000, // 图标版本
-            16, 16,     // 期望尺寸
-            0,          // LR_DEFAULTCOLOR
-        )
+    // 按平台生成图标
+    #[cfg(windows)]
+    let icon = {
+        // 运行时生成 ICO 字节 → CreateIconFromResourceEx 得到 HICON
+        let icon_bytes = generate_icon_ico();
+        let res_data = &icon_bytes[22..]; // 跳过 ICONDIR+ICONDIRENTRY 头
+        let hicon = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::CreateIconFromResourceEx(
+                res_data.as_ptr(),
+                res_data.len() as u32,
+                1,          // fIcon = TRUE
+                0x00030000, // 图标版本
+                16, 16,     // 期望尺寸
+                0,          // LR_DEFAULTCOLOR
+            )
+        };
+        if hicon == 0 {
+            return Err("创建图标失败".into());
+        }
+        IconSource::RawIcon(hicon)
     };
-    if hicon == 0 {
-        return Err("创建图标失败".into());
-    }
 
-    let mut tray = TrayItem::new("LanShare", IconSource::RawIcon(hicon))?;
+    #[cfg(target_os = "macos")]
+    let icon = {
+        // macOS: NSImage::initWithData 需要 PNG 编码数据
+        let png_data = generate_icon_png();
+        IconSource::Data { height: 16, width: 16, data: png_data }
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let icon = {
+        // Linux ksni: D-Bus IconPixmap 需要 ARGB32 大端原始像素
+        let argb_data = generate_icon_argb32();
+        IconSource::Data { height: 16, width: 16, data: argb_data }
+    };
+
+    let mut tray = TrayItem::new("LanShare", icon)?;
     let _ = tray.add_label("LanShare - 局域网文件共享");
 
     let url_open = url.to_string();
@@ -538,20 +547,19 @@ fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Erro
     Ok(tray)
 }
 
-/// 生成 16×16 32 位图标（.ico 字节流）：蓝色圆角背景 + 白色向上箭头（传输/分享）
-#[cfg(windows)]
-fn generate_icon_bytes() -> Vec<u8> {
+// ─── 图标生成（跨平台） ───
+
+/// 生成 16×16 RGBA 像素矩阵：蓝色圆角背景 + 白色向上箭头
+fn generate_icon_pixels() -> Vec<[u8; 4]> {
     const W: usize = 16;
-    let blue: [u8; 4] = [0xE9, 0x7D, 0x2B, 0xFF]; // #2B7DE9（BGRA 序）
+    let blue: [u8; 4] = [0x2B, 0x7D, 0xE9, 0xFF]; // RGBA
     let white: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
     let transparent: [u8; 4] = [0, 0, 0, 0];
 
-    // 构建像素矩阵（逻辑坐标，y=0 为顶部）
-    let mut px = [[0u8; 4]; W * W];
+    let mut px = vec![[0u8; 4]; W * W];
     for y in 0..W {
         for x in 0..W {
             let idx = y * W + x;
-            // 四角 1px 透明 → 圆角效果
             if (x == 0 && y == 0) || (x == W - 1 && y == 0)
                 || (x == 0 && y == W - 1) || (x == W - 1 && y == W - 1)
             {
@@ -563,45 +571,80 @@ fn generate_icon_bytes() -> Vec<u8> {
             }
         }
     }
-
-    let mut v = Vec::with_capacity(1150);
-    // ICONDIR: reserved=0, type=1(图标), count=1
-    v.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
-    // ICONDIRENTRY: 16×16, 32bit, 数据长 1128, 偏移 22
-    v.extend_from_slice(&[16, 16, 0, 0, 1, 0, 32, 0]);
-    v.extend_from_slice(&1128u32.to_le_bytes());
-    v.extend_from_slice(&22u32.to_le_bytes());
-    // BITMAPINFOHEADER (40 字节): height=32（XOR+AND 双倍高度）
-    v.extend_from_slice(&40u32.to_le_bytes());
-    v.extend_from_slice(&16i32.to_le_bytes());
-    v.extend_from_slice(&32i32.to_le_bytes());
-    v.extend_from_slice(&1u16.to_le_bytes());
-    v.extend_from_slice(&32u16.to_le_bytes());
-    v.extend_from_slice(&[0u8; 24]); // 压缩/大小/分辨率/色表
-    // XOR 像素：DIB 扫描序为自下而上（从最后一行往第一行写，否则箭头会颠倒）
-    for y in (0..W).rev() {
-        for x in 0..W {
-            v.extend_from_slice(&px[y * W + x]);
-        }
-    }
-    // AND 掩码：16 行 × 4 字节，全 0（完全不透明）
-    v.extend_from_slice(&[0u8; 64]);
-    v
+    px
 }
 
 /// 判断像素 (x,y) 是否属于白色向上箭头（16×16 逻辑坐标，y=0 为顶部）
-#[cfg(windows)]
 fn is_arrow_pixel(x: usize, y: usize) -> bool {
-    // 箭头三角：第 3-7 行，自中心向外展开
     if (3..=7).contains(&y) {
-        let spread = y - 2; // 行3:1 … 行7:5
+        let spread = y - 2;
         return x >= 8 - spread && x <= 7 + spread;
     }
-    // 箭杆：第 8-12 行，列 6-9
     if (8..=12).contains(&y) {
         return (6..=9).contains(&x);
     }
     false
+}
+
+/// Windows: 生成 16×16 32位 ICO 字节流（BGRA 序）
+#[cfg(windows)]
+fn generate_icon_ico() -> Vec<u8> {
+    const W: usize = 16;
+    let pixels = generate_icon_pixels();
+
+    let mut v = Vec::with_capacity(1150);
+    // ICONDIR
+    v.extend_from_slice(&[0, 0, 1, 0, 1, 0]);
+    // ICONDIRENTRY
+    v.extend_from_slice(&[16, 16, 0, 0, 1, 0, 32, 0]);
+    v.extend_from_slice(&1128u32.to_le_bytes());
+    v.extend_from_slice(&22u32.to_le_bytes());
+    // BITMAPINFOHEADER
+    v.extend_from_slice(&40u32.to_le_bytes());
+    v.extend_from_slice(&16i32.to_le_bytes());
+    v.extend_from_slice(&32i32.to_le_bytes()); // XOR+AND 双倍高度
+    v.extend_from_slice(&1u16.to_le_bytes());
+    v.extend_from_slice(&32u16.to_le_bytes());
+    v.extend_from_slice(&[0u8; 24]);
+    // XOR 像素：DIB 自下而上 + RGBA→BGRA
+    for y in (0..W).rev() {
+        for x in 0..W {
+            let [r, g, b, a] = pixels[y * W + x];
+            v.extend_from_slice(&[b, g, r, a]);
+        }
+    }
+    // AND 掩码：全 0（不透明）
+    v.extend_from_slice(&[0u8; 64]);
+    v
+}
+
+/// macOS: 生成 PNG 编码数据（NSImage::initWithData 用）
+#[cfg(target_os = "macos")]
+fn generate_icon_png() -> Vec<u8> {
+    let pixels = generate_icon_pixels();
+    let rgba: Vec<u8> = pixels.iter().flat_map(|p| *p).collect();
+
+    let mut buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(std::io::Cursor::new(&mut buf), 16, 16);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&rgba).expect("png data");
+    }
+    buf
+}
+
+/// Linux: 生成 ARGB32 大端原始像素（D-Bus StatusNotifier IconPixmap 用）
+#[cfg(all(unix, not(target_os = "macos")))]
+fn generate_icon_argb32() -> Vec<u8> {
+    let pixels = generate_icon_pixels();
+    let mut data = Vec::with_capacity(16 * 16 * 4);
+    for [r, g, b, a] in &pixels {
+        // ARGB32 大端: [A, R, G, B]
+        data.extend_from_slice(&[*a, *r, *g, *b]);
+    }
+    data
 }
 
 async fn run_list(addr: &str, path: &str, recursive: bool, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
