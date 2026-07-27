@@ -10,6 +10,12 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
+/// 获取一个空闲 UDP 端口（绑定 :0 后释放）
+fn get_free_port() -> u16 {
+    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    sock.local_addr().unwrap().port()
+}
+
 async fn start_test_server(shared_dir: PathBuf, port: u16) -> tokio::task::JoinHandle<()> {
     let config = ServerConfig {
         device_id: "test-server".to_string(),
@@ -89,12 +95,12 @@ async fn test_udp_basic_echo() {
 
 #[tokio::test]
 async fn test_udp_handshake_and_auth() {
-    let port = 19871;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_auth");
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let server_handle = start_test_server(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(10), async {
         let mut client = LspClient::connect(
@@ -150,12 +156,12 @@ async fn start_test_server_with_accounts(shared_dir: PathBuf, port: u16) -> toki
 /// 账号模式认证：正确凭据映射权限，错误密码被拒绝
 #[tokio::test]
 async fn test_udp_account_auth() {
-    let port = 19876;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_account_auth");
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(15), async {
         // 正确账号密码 → 全部权限
@@ -215,7 +221,7 @@ async fn test_udp_account_auth() {
 /// 前导斜杠路径解析：根路径 "/" 应解析到共享目录而非盘符根，且拒绝目录穿越
 #[tokio::test]
 async fn test_udp_leading_slash_path() {
-    let port = 19877;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_slash");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
@@ -223,7 +229,7 @@ async fn test_udp_leading_slash_path() {
     std::fs::write(tmp_dir.join("marker.txt"), b"hello share").unwrap();
 
     let server_handle = start_test_server(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(10), async {
         let mut client = LspClient::connect(
@@ -265,12 +271,12 @@ async fn test_udp_leading_slash_path() {
 
 #[tokio::test]
 async fn test_udp_file_upload_download() {
-    let port = 19872;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_transfer");
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let server_handle = start_test_server(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(15), async {
         let mut client = LspClient::connect(
@@ -318,12 +324,12 @@ async fn test_udp_file_upload_download() {
 
 #[tokio::test]
 async fn test_udp_file_operations() {
-    let port = 19873;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_ops");
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let server_handle = start_test_server(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(15), async {
         let mut client = LspClient::connect(
@@ -367,12 +373,12 @@ async fn test_udp_file_operations() {
 /// 大文件传输测试：1MB 文件，~16 个 65KB 分块
 #[tokio::test]
 async fn test_udp_large_file_transfer() {
-    let port = 19874;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_large");
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let server_handle = start_test_server(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(30), async {
         let mut client = LspClient::connect(
@@ -438,12 +444,12 @@ async fn test_udp_large_file_transfer() {
 /// 差异传输测试：先上传完整文件，再修改少量内容后 delta 同步
 #[tokio::test]
 async fn test_udp_delta_transfer() {
-    let port = 19875;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_delta");
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let server_handle = start_test_server(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(30), async {
         let mut client = LspClient::connect(
@@ -517,7 +523,7 @@ async fn test_udp_delta_transfer() {
 /// 只读账号（bob）的写操作应被服务端拒绝，读操作正常
 #[tokio::test]
 async fn test_udp_readonly_write_denied() {
-    let port = 19878;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_readonly");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
@@ -525,7 +531,7 @@ async fn test_udp_readonly_write_denied() {
     std::fs::write(tmp_dir.join("existing.txt"), b"readonly content").unwrap();
 
     let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(15), async {
         let mut client = LspClient::connect(
@@ -573,13 +579,13 @@ async fn test_udp_readonly_write_denied() {
 /// 内存缓冲上传（upload_data）：读写账号直接由内存写入远端文件
 #[tokio::test]
 async fn test_udp_upload_data_memory() {
-    let port = 19879;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_upload_data");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
 
     let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(15), async {
         let mut client = LspClient::connect(
@@ -628,14 +634,14 @@ async fn test_udp_upload_data_memory() {
 /// 细粒度权限：carol(read,write,mkdir) 可上传/建目录，但删除/重命名被拒
 #[tokio::test]
 async fn test_udp_fine_grained_permissions() {
-    let port = 19880;
+    let port = get_free_port();
     let tmp_dir = std::env::temp_dir().join("lsp_test_fine_grained");
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
     std::fs::write(tmp_dir.join("target.txt"), b"to be renamed or deleted").unwrap();
 
     let server_handle = start_test_server_with_accounts(tmp_dir.clone(), port).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let result = timeout(Duration::from_secs(15), async {
         let mut client = LspClient::connect(
