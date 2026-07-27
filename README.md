@@ -277,7 +277,9 @@ $Shortcut.Save()
 │  • 局域网自动扫描发现服务器                         │
 │  • PIN / 账号密码认证                             │
 │  • 挂载为本地磁盘（L: 盘）                        │
-│  • 通过 WSP WebSocket 协议读写文件                 │
+│  • 通过 LSP3 UDP 协议读写文件（加密+压缩）         │
+│  • 细粒度权限控制（读/写/删除/重命名/建目录）       │
+│  • 系统托盘常驻 + 连接状态 + 手动重连              │
 └──────────────────────────────────────────────────┘
 ```
 
@@ -317,8 +319,12 @@ D:\lan-share\
 │       └── index.html      # Web 图形界面（编译时内嵌进二进制）
 └── lanshare-client/        # WinFsp 客户端
     ├── Cargo.toml
+    ├── build.rs            # 图标资源嵌入 (winres)
+    ├── assets/
+    │   └── lanshare.ico    # 应用图标
     └── src/
         ├── main.rs         # 入口 + 自动发现 + 交互选择
-        ├── fs.rs           # WinFsp 文件系统实现
-        └── wsp_client.rs   # WSP 协议客户端
+        ├── fs.rs           # WinFsp 文件系统实现（读+写回缓存）
+        ├── lsp_client.rs   # LSP3 协议客户端（同步封装）
+        └── tray.rs         # 系统托盘（状态+重连+退出）
 ```

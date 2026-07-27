@@ -4,8 +4,11 @@
 *.exe
 *.msi
 *.7z
+*.png
 dl_test.bin
 /test_shared
+/test_share
+/test-share
 /shared
 **/obj/
 **/bin/
