@@ -306,6 +306,9 @@ async fn connect_and_auth(addr: &str, pin: &str) -> Result<LspClient, Box<dyn st
 }
 
 async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, web_port: u16, auto_browser: bool, with_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(windows))]
+    let _ = with_tray; // 非 Windows 无托盘
+
     let device_name = name.unwrap_or_else(|| {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -430,7 +433,8 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
             });
         }
 
-        // 系统托盘常驻（_tray 持有到函数结束，避免图标被销毁）
+        // 系统托盘常驻（仅 Windows，_tray 持有到函数结束避免图标销毁）
+        #[cfg(windows)]
         let _tray = if with_tray {
             let url = format!("http://127.0.0.1:{}", web_port);
             match setup_tray(&url) {
@@ -468,7 +472,6 @@ async fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
     println!("║     LanShare - 局域网文件共享              ║");
     println!("╚════════════════════════════════════════════╝");
     println!();
-    println!("  图形模式启动中...");
     println!("  共享目录: {}", shared_dir.display());
     println!("  访问 PIN: {}", cfg.pin);
     println!("  LSP 端口: {}", cfg.lsp_port);
@@ -478,9 +481,16 @@ async fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Web 界面: 已禁用");
     }
     println!();
-    println!("  提示: 浏览器将自动打开；服务在托盘后台常驻");
-    println!("        右键托盘图标可打开界面 / 退出");
-    println!("        关闭本窗口将停止服务");
+    #[cfg(windows)]
+    {
+        println!("  提示: 浏览器将自动打开；服务在托盘后台常驻");
+        println!("        右键托盘图标可打开界面 / 退出");
+        println!("        关闭本窗口将停止服务");
+    }
+    #[cfg(not(windows))]
+    {
+        println!("  提示: 浏览器将自动打开；Ctrl+C 停止服务");
+    }
     println!();
     run_server(cfg.lsp_port, name, shared_dir, cfg.pin.clone(), cfg.web_port, cfg.auto_browser, true).await
 }
@@ -495,8 +505,8 @@ fn open_browser(url: &str) {
     { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
 }
 
-/// 创建系统托盘图标（含「打开界面」「退出」菜单）
-#[cfg(target_os = "windows")]
+/// 创建系统托盘图标（含「打开界面」「退出」菜单，仅 Windows）
+#[cfg(windows)]
 fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Error>> {
     use tray_item::{IconSource, TrayItem};
 
@@ -528,12 +538,8 @@ fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Erro
     Ok(tray)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn setup_tray(_url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Error>> {
-    Err("当前平台暂不支持托盘图标".into())
-}
-
 /// 生成 16×16 32 位图标（.ico 字节流）：蓝色圆角背景 + 白色向上箭头（传输/分享）
+#[cfg(windows)]
 fn generate_icon_bytes() -> Vec<u8> {
     const W: usize = 16;
     let blue: [u8; 4] = [0xE9, 0x7D, 0x2B, 0xFF]; // #2B7DE9（BGRA 序）
@@ -584,6 +590,7 @@ fn generate_icon_bytes() -> Vec<u8> {
 }
 
 /// 判断像素 (x,y) 是否属于白色向上箭头（16×16 逻辑坐标，y=0 为顶部）
+#[cfg(windows)]
 fn is_arrow_pixel(x: usize, y: usize) -> bool {
     // 箭头三角：第 3-7 行，自中心向外展开
     if (3..=7).contains(&y) {
