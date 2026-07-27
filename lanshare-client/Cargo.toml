@@ -1,8 +1,8 @@
 [package]
 name = "lanshare-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "LanShare WinFsp 客户端 - 将远程共享挂载为本地盘符"
+description = "LanShare 跨平台客户端 - 将远程共享挂载为本地盘符/目录"
 autotests = false
 autobins = false
 autolib = false
@@ -15,6 +15,7 @@ path = "src/lib.rs"
 name = "lanshare-client"
 path = "src/main.rs"
 
+# 共享依赖（跨平台）
 [dependencies]
 lsp-protocol = { path = "../lsp-protocol" }
 tokio = { version = "1", features = ["full"] }
@@ -22,11 +23,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
-widestring = "1"
-parking_lot = "0.12"
 base64 = "0.22"
-winreg = "0.55"
+parking_lot = "0.12"
 
+# Windows 专属
 [target.'cfg(windows)'.dependencies]
 winfsp = { version = "0.13", features = ["full", "windows-61"] }
 windows = { version = "0.61", features = [
@@ -42,7 +42,16 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security_Cryptography",
 ] }
+widestring = "1"
+winreg = "0.55"
+
+# Unix 专属（Linux + macOS）
+[target.'cfg(unix)'.dependencies]
+fuser = "0.15"
+libc = "0.2"
 
 [build-dependencies]
-winfsp = { version = "0.13", features = ["delayload"] }
 winres = "0.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp = { version = "0.13", features = ["delayload"] }

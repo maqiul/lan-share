@@ -431,7 +431,7 @@ impl FileSystemContext for LanShareFs {
             && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0
             && stat.size > MAX_WRITE_BUF_SIZE
         {
-            crate::log(&format!(
+            crate::discovery::log(&format!(
                 "大文件保护：{} ({} MB) 超过写回上限，以只读打开",
                 path, stat.size / 1024 / 1024
             ));
@@ -452,7 +452,7 @@ impl FileSystemContext for LanShareFs {
             match self.client.lock_file(&path, "exclusive", 60) {
                 Ok(_) => true,
                 Err(e) => {
-                    crate::log(&format!("文件锁获取失败({}): {}", path, e));
+                    crate::discovery::log(&format!("文件锁获取失败({}): {}", path, e));
                     false
                 }
             }
@@ -894,9 +894,9 @@ impl FileSystemContext for LanShareFs {
                     buf.dirty = false;
                     self.invalidate_file(&context.path);
                     self.invalidate_dir_parent(&context.path);
-                    crate::log(&format!("写回完成: {}", context.path));
+                    crate::discovery::log(&format!("写回完成: {}", context.path));
                 } else {
-                    crate::log(&format!("写回失败: {} - {:?}", context.path, result.err()));
+                    crate::discovery::log(&format!("写回失败: {} - {:?}", context.path, result.err()));
                 }
             }
         }

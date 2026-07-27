@@ -14,6 +14,9 @@ use tracing::info;
 /// 内嵌 Web UI
 const UI_HTML: &str = include_str!("../assets/index.html");
 
+/// 内嵌文件浏览器 UI
+const FILES_HTML: &str = include_str!("../assets/files.html");
+
 /// 全局服务状态
 #[derive(Clone)]
 pub struct AppState {
@@ -78,9 +81,17 @@ pub async fn start_web_server(
         .route("/s/{token}", get(crate::api::access_share))
         .route("/api/discover", get(crate::api::discover_servers))
         .route("/api/admin/audit-logs", get(crate::api::get_audit_logs))
+        // 文件浏览器 API
+        .route("/api/files", get(crate::files::list_files).delete(crate::files::delete_file))
+        .route("/api/files/download", get(crate::files::download_file))
+        .route("/api/files/preview", get(crate::files::preview_file))
+        .route("/api/files/upload", post(crate::files::upload_file))
+        .route("/api/files/mkdir", post(crate::files::mkdir))
+        .route("/api/files/rename", put(crate::files::rename_file))
         // Web UI + WSP
         .route("/", get(serve_ui))
         .route("/ui", get(serve_ui))
+        .route("/files", get(serve_files_ui))
         .route("/wsp", get(crate::wsp::wsp_upgrade))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .layer(DefaultBodyLimit::disable())
@@ -104,6 +115,17 @@ async fn serve_ui(State(state): State<Arc<AppState>>) -> Response {
         .replace("{{LSP_PORT}}", &state.lsp_port.to_string())
         .replace("{{SHARED_DIR}}", &state.shared_dir.display().to_string())
         .replace("{{START_TS}}", &state.start_ts.to_string());
+    let mut resp = Html(html).into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    resp
+}
+
+/// 渲染并返回文件浏览器页面
+async fn serve_files_ui(State(state): State<Arc<AppState>>) -> Response {
+    let html = FILES_HTML.replace("{{DEVICE_NAME}}", &state.device_name);
     let mut resp = Html(html).into_response();
     resp.headers_mut().insert(
         header::CACHE_CONTROL,

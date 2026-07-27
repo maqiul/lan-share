@@ -8,6 +8,7 @@ use tracing::{info, error};
 mod api;
 mod db;
 mod discovery;
+mod files;
 mod server;
 mod wsp;
 

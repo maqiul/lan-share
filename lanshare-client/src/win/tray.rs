@@ -228,7 +228,7 @@ unsafe fn show_context_menu(hwnd: HWND) {
     let open_text = to_wide(&format!("打开盘符 ({})", drive));
     let status_item = to_wide(&format!("连接状态：{}", status_text()));
     let reconnect_text = to_wide("重新连接");
-    let autostart_text = if crate::is_autostart_enabled() {
+    let autostart_text = if crate::win::is_autostart_enabled() {
         to_wide("✓ 开机自启动")
     } else {
         to_wide("开机自启动")
@@ -318,17 +318,17 @@ unsafe extern "system" fn wndproc(
                     return LRESULT(0);
                 }
                 IDM_RECONNECT => {
-                    crate::log("用户点击「重新连接」");
+                    crate::discovery::log("用户点击「重新连接」");
                     if let Some(Some(client)) = CLIENT.get() {
                         let client = client.clone();
                         // 在独立线程重连，避免阻塞托盘消息循环（重连可能耗时数秒）
                         std::thread::spawn(move || match client.force_reconnect() {
                             Ok(_) => {
-                                crate::log("手动重连成功");
+                                crate::discovery::log("手动重连成功");
                                 show_balloon("LanShare", "重新连接成功", false);
                             }
                             Err(e) => {
-                                crate::log(&format!("手动重连失败: {}", e));
+                                crate::discovery::log(&format!("手动重连失败: {}", e));
                                 show_balloon("LanShare", &format!("重连失败: {}", e), true);
                             }
                         });
@@ -336,16 +336,16 @@ unsafe extern "system" fn wndproc(
                     return LRESULT(0);
                 }
                 IDM_AUTOSTART => {
-                    let current = crate::is_autostart_enabled();
-                    crate::set_autostart(!current);
-                    crate::log(&format!("开机自启动: {}", if !current { "已开启" } else { "已关闭" }));
+                    let current = crate::win::is_autostart_enabled();
+                    crate::win::set_autostart(!current);
+                    crate::discovery::log(&format!("开机自启动: {}", if !current { "已开启" } else { "已关闭" }));
                     return LRESULT(0);
                 }
                 IDM_EXIT => {
-                    crate::log("用户点击「卸载并退出」");
+                    crate::discovery::log("用户点击「卸载并退出」");
                     // 优雅退出：等待写回完成（最多 10 秒）
                     if is_syncing() {
-                        crate::log("有待完成的写回，等待同步完成...");
+                        crate::discovery::log("有待完成的写回，等待同步完成...");
                         show_balloon("LanShare", "正在等待同步完成...", false);
                         let pw = PENDING_WRITES.get().cloned();
                         std::thread::spawn(move || {
@@ -361,7 +361,7 @@ unsafe extern "system" fn wndproc(
                                 }
                                 std::thread::sleep(std::time::Duration::from_millis(200));
                             }
-                            crate::log("同步完成或超时，执行退出");
+                            crate::discovery::log("同步完成或超时，执行退出");
                             unsafe { PostQuitMessage(0); }
                         });
                     } else {
@@ -369,7 +369,7 @@ unsafe extern "system" fn wndproc(
                         // 看门狗：若消息循环或卸载流程卡住，超时后强制结束进程
                         std::thread::spawn(|| {
                             std::thread::sleep(std::time::Duration::from_secs(5));
-                            crate::log("退出看门狗超时，强制结束进程");
+                            crate::discovery::log("退出看门狗超时，强制结束进程");
                             std::process::exit(0);
                         });
                         PostQuitMessage(0);
