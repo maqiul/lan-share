@@ -620,11 +620,10 @@ pub async fn restart_server(State(state): State<Arc<AppState>>, headers: HeaderM
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         if let Ok(exe) = std::env::current_exe() {
-            let exe_str = exe.display().to_string();
-
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
+                let exe_str = exe.display().to_string();
                 // DETACHED_PROCESS(0x08) | CREATE_NEW_PROCESS_GROUP(0x200)
                 // 等 2 秒让旧进程释放端口，再 start 新实例
                 let _ = std::process::Command::new("cmd")
