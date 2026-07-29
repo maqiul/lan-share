@@ -3,4 +3,4 @@
 
 pub mod lsp_client;
 
-pub use lsp_client::{DirEntry, StatResp, LspShareClient, LspAuth};
+pub use lsp_client::{DirEntry, LspAuth, LspShareClient, StatResp};

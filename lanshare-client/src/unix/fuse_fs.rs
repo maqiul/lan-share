@@ -42,7 +42,11 @@ impl InodeTable {
         let mut inodes = HashMap::new();
         paths.insert(FUSE_ROOT_ID, "/".to_string());
         inodes.insert("/".to_string(), FUSE_ROOT_ID);
-        Self { paths, inodes, next_ino: 2 }
+        Self {
+            paths,
+            inodes,
+            next_ino: 2,
+        }
     }
 
     fn path_of(&self, ino: u64) -> Option<&str> {
@@ -255,7 +259,14 @@ impl Filesystem for LanShareFuse {
         }
     }
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
         let path = {
             let table = self.table.read();
             match table.path_of(ino) {
@@ -276,8 +287,8 @@ impl Filesystem for LanShareFuse {
             FUSE_ROOT_ID
         } else {
             let parent_path = match path.rfind('/') {
-                Some(0) => "/".to_string(),        // "/foo" → 父为 "/"
-                Some(i) => path[..i].to_string(),  // "/foo/bar" → "/foo"
+                Some(0) => "/".to_string(),       // "/foo" → 父为 "/"
+                Some(i) => path[..i].to_string(), // "/foo/bar" → "/foo"
                 None => "/".to_string(),
             };
             table.get_or_alloc(&parent_path)
@@ -290,7 +301,11 @@ impl Filesystem for LanShareFuse {
         for e in &entries {
             let child = Self::child_path(&path, &e.name);
             let child_ino = table.get_or_alloc(&child);
-            let kind = if e.is_dir { FileType::Directory } else { FileType::RegularFile };
+            let kind = if e.is_dir {
+                FileType::Directory
+            } else {
+                FileType::RegularFile
+            };
             all.push((child_ino, kind, e.name.clone()));
         }
         drop(table);
@@ -322,20 +337,26 @@ impl Filesystem for LanShareFuse {
             // 检查文件大小（大文件保护）
             match self.client.stat(&path) {
                 Ok(stat) if stat.exists && stat.size > MAX_WRITE_BUF_SIZE => {
-                    log(&format!("文件过大({} bytes)，以只读打开: {}", stat.size, path));
+                    log(&format!(
+                        "文件过大({} bytes)，以只读打开: {}",
+                        stat.size, path
+                    ));
                     // 降级为只读
                     let data = match self.client.download(&path, 0) {
                         Ok(d) => d,
                         Err(_) => return reply.error(libc::EIO),
                     };
                     let fh = self.alloc_fh();
-                    self.files.write().insert(fh, OpenFile {
-                        path,
-                        write_buf: None,
-                        read_cache: Some(data),
-                        dirty: false,
-                        holds_lock: false,
-                    });
+                    self.files.write().insert(
+                        fh,
+                        OpenFile {
+                            path,
+                            write_buf: None,
+                            read_cache: Some(data),
+                            dirty: false,
+                            holds_lock: false,
+                        },
+                    );
                     return reply.opened(fh, 0);
                 }
                 Ok(stat) if stat.exists => {
@@ -353,13 +374,16 @@ impl Filesystem for LanShareFuse {
                         }
                     };
                     let fh = self.alloc_fh();
-                    self.files.write().insert(fh, OpenFile {
-                        path,
-                        write_buf: Some(data),
-                        read_cache: None,
-                        dirty: false,
-                        holds_lock,
-                    });
+                    self.files.write().insert(
+                        fh,
+                        OpenFile {
+                            path,
+                            write_buf: Some(data),
+                            read_cache: None,
+                            dirty: false,
+                            holds_lock,
+                        },
+                    );
                     reply.opened(fh, 0);
                 }
                 _ => reply.error(libc::ENOENT),
@@ -371,13 +395,16 @@ impl Filesystem for LanShareFuse {
                 Err(_) => return reply.error(libc::EIO),
             };
             let fh = self.alloc_fh();
-            self.files.write().insert(fh, OpenFile {
-                path,
-                write_buf: None,
-                read_cache: Some(data),
-                dirty: false,
-                holds_lock: false,
-            });
+            self.files.write().insert(
+                fh,
+                OpenFile {
+                    path,
+                    write_buf: None,
+                    read_cache: Some(data),
+                    dirty: false,
+                    holds_lock: false,
+                },
+            );
             reply.opened(fh, 0);
         }
     }
@@ -514,19 +541,30 @@ impl Filesystem for LanShareFuse {
 
         let ino = self.table.write().get_or_alloc(&path);
         let fh = self.alloc_fh();
-        self.files.write().insert(fh, OpenFile {
-            path: path.clone(),
-            write_buf: Some(Vec::new()),
-            read_cache: None,
-            dirty: true, // 空文件也需要创建（flush 时上传）
-            holds_lock,
-        });
+        self.files.write().insert(
+            fh,
+            OpenFile {
+                path: path.clone(),
+                write_buf: Some(Vec::new()),
+                read_cache: None,
+                dirty: true, // 空文件也需要创建（flush 时上传）
+                holds_lock,
+            },
+        );
 
         let attr = self.make_attr(ino, false, 0, "0");
         reply.created(&ATTR_TTL, &attr, 0, fh, 0);
     }
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, mode: u32, _umask: u32, reply: ReplyEntry) {
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &std::ffi::OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
         let _ = mode;
         if !self.client.can("mkdir") {
             return reply.error(libc::EACCES);
@@ -635,7 +673,10 @@ impl Filesystem for LanShareFuse {
                 Some(p) => p.to_string(),
                 None => return reply.error(libc::ENOENT),
             };
-            (Self::child_path(&pp, &name), Self::child_path(&np, &newname))
+            (
+                Self::child_path(&pp, &name),
+                Self::child_path(&np, &newname),
+            )
         };
 
         match self.client.rename(&old_path, &new_path) {
@@ -653,14 +694,14 @@ impl Filesystem for LanShareFuse {
     fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuser::ReplyStatfs) {
         // 报告一个合理的虚拟容量
         reply.statfs(
-            1024 * 1024,       // blocks（512B 单位 → 512MB 虚拟）
-            512 * 1024,        // bfree
-            512 * 1024,        // bavail
-            1_000_000,         // files
-            900_000,           // ffree
-            512,               // bsize
-            255,               // namelen
-            512,               // frsize
+            1024 * 1024, // blocks（512B 单位 → 512MB 虚拟）
+            512 * 1024,  // bfree
+            512 * 1024,  // bavail
+            1_000_000,   // files
+            900_000,     // ffree
+            512,         // bsize
+            255,         // namelen
+            512,         // frsize
         );
     }
 

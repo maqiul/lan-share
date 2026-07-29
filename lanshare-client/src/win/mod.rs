@@ -74,8 +74,14 @@ fn show_message_box(text: &str, title: &str, flags: u32) {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::UI::WindowsAndMessaging::*;
-    let text_w: Vec<u16> = OsStr::new(text).encode_wide().chain(std::iter::once(0)).collect();
-    let title_w: Vec<u16> = OsStr::new(title).encode_wide().chain(std::iter::once(0)).collect();
+    let text_w: Vec<u16> = OsStr::new(text)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let title_w: Vec<u16> = OsStr::new(title)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         MessageBoxW(
             None,
@@ -113,11 +119,7 @@ pub fn run() {
         use windows::Win32::System::Threading::CreateMutexW;
         let _ = CreateMutexW(None, true, w!("Global\\LanShareClient_Mutex"));
         if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
-            show_message_box(
-                "LanShare 客户端已在运行中。",
-                "LanShare 客户端",
-                0x40,
-            );
+            show_message_box("LanShare 客户端已在运行中。", "LanShare 客户端", 0x40);
             return;
         }
     }
@@ -188,7 +190,9 @@ pub fn run() {
     let (client_tx, client_rx) = std::sync::mpsc::channel::<Arc<LspShareClient>>();
     let (pending_tx, pending_rx) =
         std::sync::mpsc::channel::<Arc<std::sync::atomic::AtomicUsize>>();
-    let shared = Arc::new(Mutex::new(Some((server, auth, mount, label, drive_tx, client_tx, pending_tx))));
+    let shared = Arc::new(Mutex::new(Some((
+        server, auth, mount, label, drive_tx, client_tx, pending_tx,
+    ))));
 
     let init = winfsp_init_or_die();
 
@@ -196,12 +200,11 @@ pub fn run() {
 
     let mut fsp = FileSystemServiceBuilder::new()
         .with_start(move || {
-            let (server, auth, mount, label, drive_tx, client_tx, pending_tx) = shared
-                .lock()
-                .unwrap()
-                .take()
-                .expect("配置已被消费");
-            svc_start(&server, &auth, &mount, &label, drive_tx, client_tx, pending_tx)
+            let (server, auth, mount, label, drive_tx, client_tx, pending_tx) =
+                shared.lock().unwrap().take().expect("配置已被消费");
+            svc_start(
+                &server, &auth, &mount, &label, drive_tx, client_tx, pending_tx,
+            )
         })
         .with_stop(move |fs| {
             svc_stop(fs);
@@ -229,7 +232,10 @@ pub fn run() {
 
                         let cur_ip = get_local_ip();
                         if cur_ip != last_ip {
-                            discovery::log(&format!("网络变化: {} -> {}，触发重连", last_ip, cur_ip));
+                            discovery::log(&format!(
+                                "网络变化: {} -> {}，触发重连",
+                                last_ip, cur_ip
+                            ));
                             last_ip = cur_ip.clone();
                             let _ = probe_client.force_reconnect();
                             tray::show_balloon("LanShare", "网络变化，已重新连接", false);
@@ -331,10 +337,8 @@ fn svc_start(
         debug_mode: DebugMode::none(),
     };
 
-    let mut host =
-        FileSystemHost::<LanShareFs>::new_with_options(fs_params, context).map_err(|_| {
-            FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
-        })?;
+    let mut host = FileSystemHost::<LanShareFs>::new_with_options(fs_params, context)
+        .map_err(|_| FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0))?;
 
     let drive = if mount == "*" || mount.is_empty() {
         find_free_drive()
@@ -344,9 +348,8 @@ fn svc_start(
         mount.to_string()
     };
 
-    host.mount(drive.as_str()).map_err(|_| {
-        FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0)
-    })?;
+    host.mount(drive.as_str())
+        .map_err(|_| FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0))?;
 
     host.start()
         .map_err(|_| FspError::NTSTATUS(windows::Win32::Foundation::STATUS_UNSUCCESSFUL.0))?;
@@ -363,7 +366,11 @@ fn svc_start(
     println!("  权限模式：{}", if writable { "可读写" } else { "只读" });
     println!();
 
-    discovery::log(&format!("挂载成功，盘符 {}（{}）", drive, if writable { "可读写" } else { "只读" }));
+    discovery::log(&format!(
+        "挂载成功，盘符 {}（{}）",
+        drive,
+        if writable { "可读写" } else { "只读" }
+    ));
 
     Ok(LanShareFsHost { host })
 }

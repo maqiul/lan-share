@@ -45,8 +45,7 @@ pub fn hkdf_sha256(
 ) -> Vec<u8> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = vec![0u8; length];
-    hk.expand(info, &mut okm)
-        .expect("HKDF expand failed");
+    hk.expand(info, &mut okm).expect("HKDF expand failed");
     okm
 }
 
@@ -302,7 +301,8 @@ mod tests {
         let (ct, tag) = aead::encrypt(&client_keys.client_write_key, &nonce, b"", plaintext);
 
         // 服务端用 client_write_key 解密（同一个密钥）
-        let decrypted = aead::decrypt(&server_keys.client_write_key, &nonce, b"", &ct, &tag).unwrap();
+        let decrypted =
+            aead::decrypt(&server_keys.client_write_key, &nonce, b"", &ct, &tag).unwrap();
         assert_eq!(decrypted, plaintext);
 
         // 服务端用 server_write_key 加密回复
@@ -311,7 +311,8 @@ mod tests {
         let (ct2, tag2) = aead::encrypt(&server_keys.server_write_key, &nonce2, b"", reply);
 
         // 客户端用 server_write_key 解密
-        let decrypted2 = aead::decrypt(&client_keys.server_write_key, &nonce2, b"", &ct2, &tag2).unwrap();
+        let decrypted2 =
+            aead::decrypt(&client_keys.server_write_key, &nonce2, b"", &ct2, &tag2).unwrap();
         assert_eq!(decrypted2, reply);
     }
 

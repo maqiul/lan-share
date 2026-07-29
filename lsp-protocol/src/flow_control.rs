@@ -283,8 +283,10 @@ impl FlowControlManager {
     pub fn register_stream(&mut self, stream_id: u32, initial_window: u32) {
         self.senders
             .insert(stream_id, SenderFlowControl::new(initial_window));
-        self.receivers
-            .insert(stream_id, ReceiverFlowControl::new(self.default_buffer_size));
+        self.receivers.insert(
+            stream_id,
+            ReceiverFlowControl::new(self.default_buffer_size),
+        );
     }
 
     /// 注销流

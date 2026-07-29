@@ -1,9 +1,9 @@
 //! LSP v3.0 端到端集成测试
 
-use lsp_protocol::{LspClient, LspServer, ServerConfig};
-use lsp_protocol::transport::{UdpConnection, encode_frame, decode_frame};
-use lsp_protocol::protocol::*;
 use bytes::Bytes;
+use lsp_protocol::protocol::*;
+use lsp_protocol::transport::{decode_frame, encode_frame, UdpConnection};
+use lsp_protocol::{LspClient, LspServer, ServerConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +45,10 @@ async fn test_udp_connection_send_recv() {
         .expect("connect_client failed");
 
     let frame = Frame::new(FrameType::Keepalive, 0, 0, Bytes::new());
-    client_conn.send_frame(frame).await.expect("send_frame failed");
+    client_conn
+        .send_frame(frame)
+        .await
+        .expect("send_frame failed");
 
     let mut buf = [0u8; 65535];
     let (len, src) = timeout(Duration::from_secs(3), server_socket.recv_from(&mut buf))
@@ -126,7 +129,10 @@ async fn test_udp_handshake_and_auth() {
 }
 
 /// 启动注入账号验证器的测试服务端
-async fn start_test_server_with_accounts(shared_dir: PathBuf, port: u16) -> tokio::task::JoinHandle<()> {
+async fn start_test_server_with_accounts(
+    shared_dir: PathBuf,
+    port: u16,
+) -> tokio::task::JoinHandle<()> {
     let config = ServerConfig {
         device_id: "test-server".to_string(),
         device_name: "Test Server".to_string(),
@@ -243,7 +249,10 @@ async fn test_udp_leading_slash_path() {
         client.authenticate("123456").await.expect("Auth failed");
 
         // 根路径 "/" 应列出共享目录内容（含 marker.txt），而非盘符根
-        let entries = client.list_files("/", false).await.expect("List root failed");
+        let entries = client
+            .list_files("/", false)
+            .await
+            .expect("List root failed");
         assert!(
             entries.iter().any(|e| e.name == "marker.txt"),
             "root listing should contain marker.txt from shared dir, got: {:?}",
@@ -251,7 +260,10 @@ async fn test_udp_leading_slash_path() {
         );
 
         // 带前导斜杠的子路径 stat 应命中共享目录内的文件
-        let stat = client.stat_file("/marker.txt").await.expect("Stat /marker.txt failed");
+        let stat = client
+            .stat_file("/marker.txt")
+            .await
+            .expect("Stat /marker.txt failed");
         assert_eq!(stat.size, 11);
 
         // 目录穿越应被拒绝（返回错误，而非逃逸到上级目录）
@@ -350,13 +362,22 @@ async fn test_udp_file_operations() {
         assert!(entries.iter().any(|e| e.name == "test_dir"));
 
         std::fs::write(tmp_dir.join("test_dir/old.txt"), b"rename me").unwrap();
-        client.rename("test_dir/old.txt", "test_dir/new.txt").await.expect("Rename failed");
+        client
+            .rename("test_dir/old.txt", "test_dir/new.txt")
+            .await
+            .expect("Rename failed");
         assert!(tmp_dir.join("test_dir/new.txt").exists());
 
-        client.delete_file("test_dir/new.txt", false).await.expect("Delete failed");
+        client
+            .delete_file("test_dir/new.txt", false)
+            .await
+            .expect("Delete failed");
         assert!(!tmp_dir.join("test_dir/new.txt").exists());
 
-        client.delete_file("test_dir", true).await.expect("Delete dir failed");
+        client
+            .delete_file("test_dir", true)
+            .await
+            .expect("Delete dir failed");
         assert!(!tmp_dir.join("test_dir").exists());
 
         client.goodbye().await.ok();
@@ -427,7 +448,11 @@ async fn test_udp_large_file_transfer() {
         assert_eq!(downloaded, file_size as u64, "Download size mismatch");
 
         let downloaded_data = std::fs::read(&local_download).unwrap();
-        assert_eq!(downloaded_data.len(), file_size, "Download file size mismatch");
+        assert_eq!(
+            downloaded_data.len(),
+            file_size,
+            "Download file size mismatch"
+        );
         assert_eq!(downloaded_data, test_data, "Download file content mismatch");
 
         client.goodbye().await.ok();
@@ -500,14 +525,18 @@ async fn test_udp_delta_transfer() {
         assert!(
             delta_size < file_size as u64 / 2,
             "Delta size {} should be much smaller than file size {}",
-            delta_size, file_size
+            delta_size,
+            file_size
         );
 
         // 验证服务端文件内容
         let server_file = tmp_dir.join("delta_file.bin");
         let server_data = std::fs::read(&server_file).unwrap();
         assert_eq!(server_data.len(), file_size, "Server file size mismatch");
-        assert_eq!(server_data, modified_data, "Server file content mismatch after delta");
+        assert_eq!(
+            server_data, modified_data,
+            "Server file content mismatch after delta"
+        );
 
         client.goodbye().await.ok();
     })
@@ -549,20 +578,47 @@ async fn test_udp_readonly_write_denied() {
         assert_eq!(permission, "read");
 
         // 写操作一律被拒（服务端返回 0x05 错误帧）
-        assert!(client.mkdir("hacked_dir").await.is_err(), "mkdir should be denied");
-        assert!(client.upload_data(b"hack", "hacked.txt").await.is_err(), "upload_data should be denied");
-        assert!(client.delete_file("existing.txt", false).await.is_err(), "delete should be denied");
-        assert!(client.rename("existing.txt", "renamed.txt").await.is_err(), "rename should be denied");
+        assert!(
+            client.mkdir("hacked_dir").await.is_err(),
+            "mkdir should be denied"
+        );
+        assert!(
+            client.upload_data(b"hack", "hacked.txt").await.is_err(),
+            "upload_data should be denied"
+        );
+        assert!(
+            client.delete_file("existing.txt", false).await.is_err(),
+            "delete should be denied"
+        );
+        assert!(
+            client.rename("existing.txt", "renamed.txt").await.is_err(),
+            "rename should be denied"
+        );
 
         // 服务端文件未被破坏
-        assert!(tmp_dir.join("existing.txt").exists(), "existing file must remain");
-        assert!(!tmp_dir.join("hacked_dir").exists(), "mkdir must not happen");
-        assert!(!tmp_dir.join("hacked.txt").exists(), "upload must not happen");
+        assert!(
+            tmp_dir.join("existing.txt").exists(),
+            "existing file must remain"
+        );
+        assert!(
+            !tmp_dir.join("hacked_dir").exists(),
+            "mkdir must not happen"
+        );
+        assert!(
+            !tmp_dir.join("hacked.txt").exists(),
+            "upload must not happen"
+        );
 
         // 读操作正常
-        let entries = client.list_files("/", false).await.expect("list should work");
+        let entries = client
+            .list_files("/", false)
+            .await
+            .expect("list should work");
         assert!(entries.iter().any(|e| e.name == "existing.txt"));
-        let stat = client.stat_file("existing.txt").await.expect("stat should work");
+        let stat = client
+            .stat_file("existing.txt")
+            .await
+            .expect("stat should work");
         assert_eq!(stat.size, 16);
 
         client.goodbye().await.ok();
@@ -616,7 +672,10 @@ async fn test_udp_upload_data_memory() {
 
         // 覆盖写：upload_data 恒为整体替换
         let new_data = b"overwritten";
-        client.upload_data(new_data, "memory.txt").await.expect("overwrite failed");
+        client
+            .upload_data(new_data, "memory.txt")
+            .await
+            .expect("overwrite failed");
         let server_data = std::fs::read(tmp_dir.join("memory.txt")).unwrap();
         assert_eq!(server_data, new_data);
 
@@ -663,21 +722,39 @@ async fn test_udp_fine_grained_permissions() {
             .upload_data(b"carol was here", "carol.txt")
             .await
             .expect("upload_data should succeed with write perm");
-        assert_eq!(std::fs::read(tmp_dir.join("carol.txt")).unwrap(), b"carol was here");
+        assert_eq!(
+            std::fs::read(tmp_dir.join("carol.txt")).unwrap(),
+            b"carol was here"
+        );
 
         // mkdir 权限 ✓：建目录成功
-        client.mkdir("carol_dir").await.expect("mkdir should succeed with mkdir perm");
+        client
+            .mkdir("carol_dir")
+            .await
+            .expect("mkdir should succeed with mkdir perm");
         assert!(tmp_dir.join("carol_dir").is_dir());
 
         // delete 权限 ✗：删除被拒
         let del_err = client.delete_file("target.txt", false).await;
-        assert!(del_err.is_err(), "delete should be denied without delete perm");
-        assert!(tmp_dir.join("target.txt").exists(), "file must still exist after denied delete");
+        assert!(
+            del_err.is_err(),
+            "delete should be denied without delete perm"
+        );
+        assert!(
+            tmp_dir.join("target.txt").exists(),
+            "file must still exist after denied delete"
+        );
 
         // rename 权限 ✗：重命名被拒
         let ren_err = client.rename("target.txt", "renamed.txt").await;
-        assert!(ren_err.is_err(), "rename should be denied without rename perm");
-        assert!(tmp_dir.join("target.txt").exists(), "file must still exist after denied rename");
+        assert!(
+            ren_err.is_err(),
+            "rename should be denied without rename perm"
+        );
+        assert!(
+            tmp_dir.join("target.txt").exists(),
+            "file must still exist after denied rename"
+        );
 
         client.goodbye().await.ok();
     })

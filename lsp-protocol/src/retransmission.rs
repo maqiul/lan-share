@@ -71,7 +71,7 @@ impl RttEstimator {
                 let rttvar = self.rttvar.unwrap_or(rtt / 2);
 
                 // RTTVAR = (1 - 1/4) * RTTVAR + (1/4) * |SRTT - R|
-                let delta = if srtt > rtt { srtt - rtt } else { rtt - srtt };
+                let delta = srtt.abs_diff(rtt);
                 let new_rttvar = (rttvar * 3 + delta) / 4;
 
                 // SRTT = (1 - 1/8) * SRTT + (1/8) * R
@@ -143,8 +143,8 @@ pub struct SentFrameInfo {
 /// SACK 块：表示 [left, right] 范围内的帧已被确认
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SackBlock {
-    pub left: u32,   // 起始序列号（含）
-    pub right: u32,  // 结束序列号（含）
+    pub left: u32,  // 起始序列号（含）
+    pub right: u32, // 结束序列号（含）
 }
 
 /// 重传管理器
@@ -194,10 +194,7 @@ pub enum RetransmitEvent {
         data: Vec<u8>,
     },
     /// 帧被丢弃（超过最大重传次数）
-    Dropped {
-        stream_id: u32,
-        seq_num: u32,
-    },
+    Dropped { stream_id: u32, seq_num: u32 },
 }
 
 impl RetransmissionManager {
@@ -288,10 +285,7 @@ impl RetransmissionManager {
 
             if let Some(buffer) = self.send_buffers.get_mut(&stream_id) {
                 // 删除所有 <= ack_seq 的帧
-                let confirmed: Vec<u32> = buffer
-                    .range(..=ack_seq)
-                    .map(|(k, _)| *k)
-                    .collect();
+                let confirmed: Vec<u32> = buffer.range(..=ack_seq).map(|(k, _)| *k).collect();
 
                 for seq in confirmed {
                     // 更新 RTT（只对非重传帧）
@@ -387,9 +381,7 @@ impl RetransmissionManager {
                 // 找到最早的未确认帧
                 let timed_out: Vec<(u32, bool)> = buffer
                     .iter()
-                    .filter(|(seq, info)| {
-                        **seq > acked && now.duration_since(info.sent_at) >= rto
-                    })
+                    .filter(|(seq, info)| **seq > acked && now.duration_since(info.sent_at) >= rto)
                     .map(|(seq, info)| (*seq, info.retransmit_count >= MAX_RETRANSMIT_COUNT))
                     .collect();
 
@@ -397,7 +389,10 @@ impl RetransmissionManager {
                     if should_drop {
                         // 超过最大重传次数，丢弃
                         buffer.remove(&seq);
-                        events.push(RetransmitEvent::Dropped { stream_id, seq_num: seq });
+                        events.push(RetransmitEvent::Dropped {
+                            stream_id,
+                            seq_num: seq,
+                        });
                         self.stats.dropped += 1;
                     } else if let Some(info) = buffer.get_mut(&seq) {
                         // 超时重传
@@ -429,7 +424,10 @@ impl RetransmissionManager {
 
     /// 获取当前发送窗口是否已满
     pub fn is_window_full(&self, stream_id: u32) -> bool {
-        let window = *self.send_windows.get(&stream_id).unwrap_or(&DEFAULT_SEND_WINDOW);
+        let window = *self
+            .send_windows
+            .get(&stream_id)
+            .unwrap_or(&DEFAULT_SEND_WINDOW);
         let in_flight = self
             .send_buffers
             .get(&stream_id)

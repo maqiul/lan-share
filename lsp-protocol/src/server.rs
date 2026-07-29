@@ -46,7 +46,13 @@ impl Default for ServerConfig {
 
 /// 会话状态
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SessionState { Hello, Authenticating, Established, Closing, Closed }
+pub enum SessionState {
+    Hello,
+    Authenticating,
+    Established,
+    Closing,
+    Closed,
+}
 
 /// 流信息
 pub struct StreamState {
@@ -58,7 +64,12 @@ pub struct StreamState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum StreamLifecycle { Opening, Open, Closing, Closed }
+pub enum StreamLifecycle {
+    Opening,
+    Open,
+    Closing,
+    Closed,
+}
 
 /// 会话信息
 pub struct Session {
@@ -103,9 +114,9 @@ pub struct LspServer {
 /// 修复 Windows 下 `PathBuf::join("/...")` 会丢弃共享目录、暴露整个盘符的问题。
 /// 非法路径（含 `..`）返回 `None`。
 fn safe_join(base: &std::path::Path, req: &str) -> Option<PathBuf> {
-    let trimmed = req.trim_start_matches(|c| c == '/' || c == '\\');
+    let trimmed = req.trim_start_matches(['/', '\\']);
     let mut result = base.to_path_buf();
-    for seg in trimmed.split(|c| c == '/' || c == '\\') {
+    for seg in trimmed.split(['/', '\\']) {
         match seg {
             "" | "." => continue,
             ".." => return None,
@@ -234,15 +245,23 @@ impl LspServer {
 
                 tokio::spawn(async move {
                     let conn = UdpConnection::from_peer(
-                        socket_clone, src_addr, rx,
-                        config.use_encryption, config.use_compression,
+                        socket_clone,
+                        src_addr,
+                        rx,
+                        config.use_encryption,
+                        config.use_compression,
                     );
                     let conn = Arc::new(conn);
                     let retransmit_handle = UdpConnection::spawn_retransmit_timer(conn.clone());
 
                     let result = Self::handle_peer(
-                        &conn, &config, &sessions, &file_locks, &account_verifier,
-                    ).await;
+                        &conn,
+                        &config,
+                        &sessions,
+                        &file_locks,
+                        &account_verifier,
+                    )
+                    .await;
 
                     retransmit_handle.abort();
 
@@ -271,7 +290,8 @@ impl LspServer {
 
         let mut session_id = String::new();
         let key_pair = KeyPair::generate();
-        let mut write_streams: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        let mut write_streams: std::collections::HashMap<u32, String> =
+            std::collections::HashMap::new();
 
         loop {
             let frame = match conn.recv_frame().await {
@@ -293,7 +313,14 @@ impl LspServer {
                     Self::handle_auth_init(&frame, &session_id, &key_pair, sessions).await?
                 }
                 FrameType::AuthResponse => {
-                    Self::handle_auth_response(&frame, &session_id, config, sessions, account_verifier).await?
+                    Self::handle_auth_response(
+                        &frame,
+                        &session_id,
+                        config,
+                        sessions,
+                        account_verifier,
+                    )
+                    .await?
                 }
                 FrameType::StreamOpen => {
                     Self::handle_stream_open(&frame, &session_id, sessions).await?
@@ -301,12 +328,8 @@ impl LspServer {
                 FrameType::StreamClose => {
                     Self::handle_stream_close(&frame, &session_id, sessions).await?
                 }
-                FrameType::FileList => {
-                    Self::handle_file_list(&frame, config).await?
-                }
-                FrameType::FileStat => {
-                    Self::handle_file_stat(&frame, config).await?
-                }
+                FrameType::FileList => Self::handle_file_list(&frame, config).await?,
+                FrameType::FileStat => Self::handle_file_stat(&frame, config).await?,
                 FrameType::FileMkdir => {
                     Self::handle_file_mkdir(&frame, &session_id, config, sessions).await?
                 }
@@ -316,11 +339,17 @@ impl LspServer {
                 FrameType::FileDelete => {
                     Self::handle_file_delete(&frame, &session_id, config, sessions).await?
                 }
-                FrameType::ReadReq => {
-                    Self::handle_read_req(&frame, config).await?
-                }
+                FrameType::ReadReq => Self::handle_read_req(&frame, config).await?,
                 FrameType::WriteReq => {
-                    Self::handle_write_req(&frame, &session_id, config, sessions, file_locks, &mut write_streams).await?
+                    Self::handle_write_req(
+                        &frame,
+                        &session_id,
+                        config,
+                        sessions,
+                        file_locks,
+                        &mut write_streams,
+                    )
+                    .await?
                 }
                 FrameType::WriteData => {
                     Self::handle_write_data(&frame, config, &write_streams).await?
@@ -384,24 +413,39 @@ impl LspServer {
     // 帧处理器
 
     async fn handle_hello(
-        frame: &Frame, session_id: &mut String,
-        config: &ServerConfig, sessions: &Arc<RwLock<HashMap<String, Session>>>,
+        frame: &Frame,
+        session_id: &mut String,
+        config: &ServerConfig,
+        sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         let payload: HelloPayload = serde_json::from_slice(&frame.payload)?;
-        info!("Hello from {} ({})", payload.device_info.name, payload.device_info.id);
+        info!(
+            "Hello from {} ({})",
+            payload.device_info.name, payload.device_info.id
+        );
 
         *session_id = Uuid::new_v4().to_string();
 
         let mut server_caps = vec![
-            "stream_multiplex".to_string(), "file_watch".to_string(), "resume".to_string(),
+            "stream_multiplex".to_string(),
+            "file_watch".to_string(),
+            "resume".to_string(),
         ];
-        if config.use_encryption { server_caps.push("encryption".to_string()); }
-        if config.use_compression { server_caps.push("compression".to_string()); }
+        if config.use_encryption {
+            server_caps.push("encryption".to_string());
+        }
+        if config.use_compression {
+            server_caps.push("compression".to_string());
+        }
         server_caps.push("delta_sync".to_string());
         server_caps.push("reliable_transport".to_string());
 
-        let negotiated: Vec<String> = payload.capabilities.iter()
-            .filter(|c| server_caps.contains(c)).cloned().collect();
+        let negotiated: Vec<String> = payload
+            .capabilities
+            .iter()
+            .filter(|c| server_caps.contains(c))
+            .cloned()
+            .collect();
 
         let session = Session {
             id: session_id.clone(),
@@ -425,12 +469,18 @@ impl LspServer {
             session_id: session_id.clone(),
         };
 
-        Ok(vec![Frame::new(FrameType::HelloAck, 0, 0,
-            Bytes::from(serde_json::to_vec(&ack)?))])
+        Ok(vec![Frame::new(
+            FrameType::HelloAck,
+            0,
+            0,
+            Bytes::from(serde_json::to_vec(&ack)?),
+        )])
     }
 
     async fn handle_auth_init(
-        frame: &Frame, session_id: &str, key_pair: &KeyPair,
+        frame: &Frame,
+        session_id: &str,
+        key_pair: &KeyPair,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         let payload: AuthInitPayload = serde_json::from_slice(&frame.payload)?;
@@ -445,9 +495,8 @@ impl LspServer {
         // 真正的 X25519 ECDH
         let shared_secret = key_pair.compute_shared_secret(&client_pubkey);
 
-        let handshake_hash = Sha256::digest(
-            [&client_pubkey[..], &key_pair.public_key[..]].concat()
-        );
+        let handshake_hash =
+            Sha256::digest([&client_pubkey[..], &key_pair.public_key[..]].concat());
         let mut hh = [0u8; 32];
         hh.copy_from_slice(&handshake_hash);
         let keys = SessionKeys::derive(&shared_secret, &hh);
@@ -455,12 +504,11 @@ impl LspServer {
         // 生成挑战
         let nonce = aead::generate_nonce();
         let challenge_data = b"lsp-auth-challenge";
-        let (encrypted_challenge, _tag) = aead::encrypt(
-            &keys.server_write_key, &nonce, b"", challenge_data,
-        );
+        let (encrypted_challenge, _tag) =
+            aead::encrypt(&keys.server_write_key, &nonce, b"", challenge_data);
 
         let challenge = AuthChallengePayload {
-            server_pubkey: hex::encode(&key_pair.public_key),
+            server_pubkey: hex::encode(key_pair.public_key),
             nonce: hex::encode(nonce),
             encrypted_challenge: hex::encode(encrypted_challenge),
         };
@@ -473,13 +521,19 @@ impl LspServer {
             }
         }
 
-        Ok(vec![Frame::new(FrameType::AuthChallenge, 0, 0,
-            Bytes::from(serde_json::to_vec(&challenge)?))])
+        Ok(vec![Frame::new(
+            FrameType::AuthChallenge,
+            0,
+            0,
+            Bytes::from(serde_json::to_vec(&challenge)?),
+        )])
     }
 
     async fn handle_auth_response(
-        frame: &Frame, session_id: &str,
-        config: &ServerConfig, sessions: &Arc<RwLock<HashMap<String, Session>>>,
+        frame: &Frame,
+        session_id: &str,
+        config: &ServerConfig,
+        sessions: &Arc<RwLock<HashMap<String, Session>>>,
         account_verifier: &Option<AccountVerifier>,
     ) -> Result<Vec<Frame>> {
         let payload: AuthResponsePayload = serde_json::from_slice(&frame.payload)?;
@@ -508,8 +562,12 @@ impl LspServer {
                     reason: "Authentication failed".to_string(),
                     error_code: 0x02,
                 };
-                return Ok(vec![Frame::new(FrameType::AuthFail, 0, 0,
-                    Bytes::from(serde_json::to_vec(&fail)?))]);
+                return Ok(vec![Frame::new(
+                    FrameType::AuthFail,
+                    0,
+                    0,
+                    Bytes::from(serde_json::to_vec(&fail)?),
+                )]);
             }
         };
 
@@ -527,17 +585,28 @@ impl LspServer {
             }
         }
 
-        info!("Auth success for {} (mode: {}, permission: {})",
+        info!(
+            "Auth success for {} (mode: {}, permission: {})",
             payload.device_name,
-            if payload.auth_mode == "account" { "account" } else { "pin" },
-            permission);
+            if payload.auth_mode == "account" {
+                "account"
+            } else {
+                "pin"
+            },
+            permission
+        );
 
-        Ok(vec![Frame::new(FrameType::AuthOk, 0, 0,
-            Bytes::from(serde_json::to_vec(&ok)?))])
+        Ok(vec![Frame::new(
+            FrameType::AuthOk,
+            0,
+            0,
+            Bytes::from(serde_json::to_vec(&ok)?),
+        )])
     }
 
     async fn handle_stream_open(
-        frame: &Frame, session_id: &str,
+        frame: &Frame,
+        session_id: &str,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         let payload: StreamOpenPayload = serde_json::from_slice(&frame.payload)?;
@@ -558,12 +627,21 @@ impl LspServer {
             }
         }
 
-        info!("Stream {} opened (type: {})", frame.stream_id, payload.stream_type);
-        Ok(vec![Frame::new(FrameType::StreamOpenAck, frame.stream_id, 0, Bytes::new())])
+        info!(
+            "Stream {} opened (type: {})",
+            frame.stream_id, payload.stream_type
+        );
+        Ok(vec![Frame::new(
+            FrameType::StreamOpenAck,
+            frame.stream_id,
+            0,
+            Bytes::new(),
+        )])
     }
 
     async fn handle_stream_close(
-        frame: &Frame, session_id: &str,
+        frame: &Frame,
+        session_id: &str,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         {
@@ -590,32 +668,55 @@ impl LspServer {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let path = format!("{}/{}", payload.path, name);
 
-                let created = metadata.created().ok()
+                let created = metadata
+                    .created()
+                    .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64).unwrap_or(0);
-                let modified = metadata.modified().ok()
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let modified = metadata
+                    .modified()
+                    .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64).unwrap_or(0);
-                let accessed = metadata.accessed().ok()
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let accessed = metadata
+                    .accessed()
+                    .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64).unwrap_or(0);
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
 
                 entries.push(FileEntry {
-                    name, path,
+                    name,
+                    path,
                     size: metadata.len(),
-                    created, modified, accessed,
+                    created,
+                    modified,
+                    accessed,
                     is_dir: metadata.is_dir(),
                     readonly: metadata.permissions().readonly(),
-                    hidden: false, sha256: None, mime_type: None,
+                    hidden: false,
+                    sha256: None,
+                    mime_type: None,
                 });
             }
         }
 
         let total = entries.len() as u32;
-        let resp = FileListRespPayload { path: payload.path, entries, total, has_more: false };
+        let resp = FileListRespPayload {
+            path: payload.path,
+            entries,
+            total,
+            has_more: false,
+        };
 
-        Ok(vec![Frame::new(FrameType::FileListResp, frame.stream_id, 1,
-            Bytes::from(serde_json::to_vec(&resp)?))])
+        Ok(vec![Frame::new(
+            FrameType::FileListResp,
+            frame.stream_id,
+            1,
+            Bytes::from(serde_json::to_vec(&resp)?),
+        )])
     }
 
     async fn handle_file_stat(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
@@ -623,81 +724,145 @@ impl LspServer {
         let file_path = shared_path!(config, &payload.path, frame, 1);
 
         if !file_path.exists() {
-            let err = ErrorPayload { code: 0x04, message: "File not found".to_string(), stream_id: Some(frame.stream_id) };
-            return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, 1,
-                Bytes::from(serde_json::to_vec(&err)?))]);
+            let err = ErrorPayload {
+                code: 0x04,
+                message: "File not found".to_string(),
+                stream_id: Some(frame.stream_id),
+            };
+            return Ok(vec![Frame::new(
+                FrameType::Error,
+                frame.stream_id,
+                1,
+                Bytes::from(serde_json::to_vec(&err)?),
+            )]);
         }
 
         let metadata = fs::metadata(&file_path).await?;
         let name = file_path.file_name().unwrap().to_string_lossy().to_string();
-        let modified = metadata.modified().ok()
+        let modified = metadata
+            .modified()
+            .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64).unwrap_or(0);
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
 
         let entry = FileEntry {
-            name, path: payload.path,
+            name,
+            path: payload.path,
             size: metadata.len(),
-            created: 0, modified, accessed: 0,
+            created: 0,
+            modified,
+            accessed: 0,
             is_dir: metadata.is_dir(),
             readonly: metadata.permissions().readonly(),
-            hidden: false, sha256: None, mime_type: None,
+            hidden: false,
+            sha256: None,
+            mime_type: None,
         };
 
         let resp = FileStatRespPayload { entry };
-        Ok(vec![Frame::new(FrameType::FileStatResp, frame.stream_id, 1,
-            Bytes::from(serde_json::to_vec(&resp)?))])
+        Ok(vec![Frame::new(
+            FrameType::FileStatResp,
+            frame.stream_id,
+            1,
+            Bytes::from(serde_json::to_vec(&resp)?),
+        )])
     }
 
     async fn handle_file_mkdir(
-        frame: &Frame, session_id: &str, config: &ServerConfig,
+        frame: &Frame,
+        session_id: &str,
+        config: &ServerConfig,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         if !session_can(sessions, session_id, "mkdir").await {
-            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "mkdir")]);
+            return Ok(vec![permission_denied_frame(
+                frame.stream_id,
+                frame.seq_num,
+                "mkdir",
+            )]);
         }
         let payload: FileMkdirPayload = serde_json::from_slice(&frame.payload)?;
         let dir_path = shared_path!(config, &payload.path, frame, 1);
         fs::create_dir_all(&dir_path).await?;
         info!("Directory created: {}", payload.path);
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, 1, Bytes::new())])
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            1,
+            Bytes::new(),
+        )])
     }
 
     async fn handle_file_rename(
-        frame: &Frame, session_id: &str, config: &ServerConfig,
+        frame: &Frame,
+        session_id: &str,
+        config: &ServerConfig,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         if !session_can(sessions, session_id, "rename").await {
-            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "rename")]);
+            return Ok(vec![permission_denied_frame(
+                frame.stream_id,
+                frame.seq_num,
+                "rename",
+            )]);
         }
         let payload: FileRenamePayload = serde_json::from_slice(&frame.payload)?;
         let old_path = shared_path!(config, &payload.old_path, frame, 1);
         let new_path = shared_path!(config, &payload.new_path, frame, 1);
 
         if !old_path.exists() {
-            let err = ErrorPayload { code: 0x04, message: "Source file not found".to_string(), stream_id: Some(frame.stream_id) };
-            return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, 1,
-                Bytes::from(serde_json::to_vec(&err)?))]);
+            let err = ErrorPayload {
+                code: 0x04,
+                message: "Source file not found".to_string(),
+                stream_id: Some(frame.stream_id),
+            };
+            return Ok(vec![Frame::new(
+                FrameType::Error,
+                frame.stream_id,
+                1,
+                Bytes::from(serde_json::to_vec(&err)?),
+            )]);
         }
 
         fs::rename(&old_path, &new_path).await?;
         info!("Renamed {} -> {}", payload.old_path, payload.new_path);
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, 1, Bytes::new())])
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            1,
+            Bytes::new(),
+        )])
     }
 
     async fn handle_file_delete(
-        frame: &Frame, session_id: &str, config: &ServerConfig,
+        frame: &Frame,
+        session_id: &str,
+        config: &ServerConfig,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         if !session_can(sessions, session_id, "delete").await {
-            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "delete")]);
+            return Ok(vec![permission_denied_frame(
+                frame.stream_id,
+                frame.seq_num,
+                "delete",
+            )]);
         }
         let payload: FileDeletePayload = serde_json::from_slice(&frame.payload)?;
         let file_path = shared_path!(config, &payload.path, frame, 1);
 
         if !file_path.exists() {
-            let err = ErrorPayload { code: 0x04, message: "File not found".to_string(), stream_id: Some(frame.stream_id) };
-            return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, 1,
-                Bytes::from(serde_json::to_vec(&err)?))]);
+            let err = ErrorPayload {
+                code: 0x04,
+                message: "File not found".to_string(),
+                stream_id: Some(frame.stream_id),
+            };
+            return Ok(vec![Frame::new(
+                FrameType::Error,
+                frame.stream_id,
+                1,
+                Bytes::from(serde_json::to_vec(&err)?),
+            )]);
         }
 
         if payload.recursive && file_path.is_dir() {
@@ -707,7 +872,12 @@ impl LspServer {
         }
 
         info!("Deleted: {}", payload.path);
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, 1, Bytes::new())])
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            1,
+            Bytes::new(),
+        )])
     }
 
     async fn handle_read_req(frame: &Frame, config: &ServerConfig) -> Result<Vec<Frame>> {
@@ -715,37 +885,67 @@ impl LspServer {
         let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
 
         if !file_path.exists() {
-            let err = ErrorPayload { code: 0x04, message: "File not found".to_string(), stream_id: Some(frame.stream_id) };
-            return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, frame.seq_num,
-                Bytes::from(serde_json::to_vec(&err)?))]);
+            let err = ErrorPayload {
+                code: 0x04,
+                message: "File not found".to_string(),
+                stream_id: Some(frame.stream_id),
+            };
+            return Ok(vec![Frame::new(
+                FrameType::Error,
+                frame.stream_id,
+                frame.seq_num,
+                Bytes::from(serde_json::to_vec(&err)?),
+            )]);
         }
 
         let file_data = fs::read(&file_path).await?;
         let offset = payload.offset as usize;
-        let length = if payload.length == 0 { crate::protocol::DEFAULT_CHUNK_SIZE } else { payload.length as usize };
+        let length = if payload.length == 0 {
+            crate::protocol::DEFAULT_CHUNK_SIZE
+        } else {
+            payload.length as usize
+        };
         let end = std::cmp::min(offset + length, file_data.len());
 
         if offset >= file_data.len() {
-            let err = ErrorPayload { code: 0x07, message: "Offset out of range".to_string(), stream_id: Some(frame.stream_id) };
-            return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, frame.seq_num,
-                Bytes::from(serde_json::to_vec(&err)?))]);
+            let err = ErrorPayload {
+                code: 0x07,
+                message: "Offset out of range".to_string(),
+                stream_id: Some(frame.stream_id),
+            };
+            return Ok(vec![Frame::new(
+                FrameType::Error,
+                frame.stream_id,
+                frame.seq_num,
+                Bytes::from(serde_json::to_vec(&err)?),
+            )]);
         }
 
         let chunk = &file_data[offset..end];
         let is_last = end >= file_data.len();
 
-        Ok(vec![Frame::new(FrameType::ReadData, frame.stream_id, frame.seq_num,
-            crate::protocol::encode_read_data(payload.offset, is_last, chunk))])
+        Ok(vec![Frame::new(
+            FrameType::ReadData,
+            frame.stream_id,
+            frame.seq_num,
+            crate::protocol::encode_read_data(payload.offset, is_last, chunk),
+        )])
     }
 
     async fn handle_write_req(
-        frame: &Frame, session_id: &str, config: &ServerConfig,
+        frame: &Frame,
+        session_id: &str,
+        config: &ServerConfig,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
         file_locks: &Arc<RwLock<HashMap<String, FileLock>>>,
         write_streams: &mut std::collections::HashMap<u32, String>,
     ) -> Result<Vec<Frame>> {
         if !session_can(sessions, session_id, "write").await {
-            return Ok(vec![permission_denied_frame(frame.stream_id, frame.seq_num, "write")]);
+            return Ok(vec![permission_denied_frame(
+                frame.stream_id,
+                frame.seq_num,
+                "write",
+            )]);
         }
         let payload: WriteReqPayload = serde_json::from_slice(&frame.payload)?;
         let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
@@ -754,9 +954,17 @@ impl LspServer {
             let locks = file_locks.read().await;
             if let Some(lock) = locks.get(&payload.path) {
                 if lock.session_id != *session_id {
-                    let err = ErrorPayload { code: 0x07, message: "File is locked".to_string(), stream_id: Some(frame.stream_id) };
-                    return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, frame.seq_num,
-                        Bytes::from(serde_json::to_vec(&err)?))]);
+                    let err = ErrorPayload {
+                        code: 0x07,
+                        message: "File is locked".to_string(),
+                        stream_id: Some(frame.stream_id),
+                    };
+                    return Ok(vec![Frame::new(
+                        FrameType::Error,
+                        frame.stream_id,
+                        frame.seq_num,
+                        Bytes::from(serde_json::to_vec(&err)?),
+                    )]);
                 }
             }
         }
@@ -768,12 +976,21 @@ impl LspServer {
         fs::write(&temp_path, &[]).await?;
         info!("Write started: {}", payload.path);
 
-        let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
-            Bytes::from(serde_json::to_vec(&ack)?))])
+        let ack = AckPayload {
+            stream_id: frame.stream_id,
+            seq_num: frame.seq_num,
+        };
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            frame.seq_num,
+            Bytes::from(serde_json::to_vec(&ack)?),
+        )])
     }
 
-    async fn handle_write_data(frame: &Frame, config: &ServerConfig,
+    async fn handle_write_data(
+        frame: &Frame,
+        config: &ServerConfig,
         write_streams: &std::collections::HashMap<u32, String>,
     ) -> Result<Vec<Frame>> {
         // 二进制解码：offset(8B) + raw_data
@@ -787,6 +1004,7 @@ impl LspServer {
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&temp_path)
                 .await?;
             file.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -796,12 +1014,21 @@ impl LspServer {
             warn!("WriteData for unknown stream {}", frame.stream_id);
         }
 
-        let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
-            Bytes::from(serde_json::to_vec(&ack)?))])
+        let ack = AckPayload {
+            stream_id: frame.stream_id,
+            seq_num: frame.seq_num,
+        };
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            frame.seq_num,
+            Bytes::from(serde_json::to_vec(&ack)?),
+        )])
     }
 
-    async fn handle_write_commit(frame: &Frame, config: &ServerConfig,
+    async fn handle_write_commit(
+        frame: &Frame,
+        config: &ServerConfig,
         write_streams: &mut std::collections::HashMap<u32, String>,
     ) -> Result<Vec<Frame>> {
         let payload: WriteCommitPayload = serde_json::from_slice(&frame.payload)?;
@@ -816,14 +1043,22 @@ impl LspServer {
         // 清理 stream 映射
         write_streams.remove(&frame.stream_id);
 
-        let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
-            Bytes::from(serde_json::to_vec(&ack)?))])
+        let ack = AckPayload {
+            stream_id: frame.stream_id,
+            seq_num: frame.seq_num,
+        };
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            frame.seq_num,
+            Bytes::from(serde_json::to_vec(&ack)?),
+        )])
     }
 
     /// 文件锁管理：exclusive/shared 加锁，unlock 释放，TTL 自动过期
     async fn handle_file_lock(
-        frame: &Frame, session_id: &str,
+        frame: &Frame,
+        session_id: &str,
         file_locks: &Arc<RwLock<HashMap<String, FileLock>>>,
     ) -> Result<Vec<Frame>> {
         let payload: FileLockPayload = serde_json::from_slice(&frame.payload)?;
@@ -841,9 +1076,16 @@ impl LspServer {
                     info!("File unlocked: {} by {}", payload.path, session_id);
                 }
             }
-            let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
-            return Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
-                Bytes::from(serde_json::to_vec(&ack)?))]);
+            let ack = AckPayload {
+                stream_id: frame.stream_id,
+                seq_num: frame.seq_num,
+            };
+            return Ok(vec![Frame::new(
+                FrameType::Ack,
+                frame.stream_id,
+                frame.seq_num,
+                Bytes::from(serde_json::to_vec(&ack)?),
+            )]);
         }
 
         // 加锁：先清理过期锁
@@ -856,33 +1098,54 @@ impl LspServer {
                 if existing.session_id != *session_id {
                     let err = ErrorPayload {
                         code: 0x08,
-                        message: format!("File is locked by another client (expires in {}s)",
-                            existing.expires_at - now),
+                        message: format!(
+                            "File is locked by another client (expires in {}s)",
+                            existing.expires_at - now
+                        ),
                         stream_id: Some(frame.stream_id),
                     };
-                    return Ok(vec![Frame::new(FrameType::Error, frame.stream_id, frame.seq_num,
-                        Bytes::from(serde_json::to_vec(&err)?))]);
+                    return Ok(vec![Frame::new(
+                        FrameType::Error,
+                        frame.stream_id,
+                        frame.seq_num,
+                        Bytes::from(serde_json::to_vec(&err)?),
+                    )]);
                 }
             }
 
             // 加锁 / 续期
             let ttl = if payload.ttl == 0 { 30 } else { payload.ttl };
-            locks.insert(payload.path.clone(), FileLock {
-                path: payload.path.clone(),
-                session_id: session_id.to_string(),
-                mode: payload.mode.clone(),
-                expires_at: now + ttl as i64,
-            });
+            locks.insert(
+                payload.path.clone(),
+                FileLock {
+                    path: payload.path.clone(),
+                    session_id: session_id.to_string(),
+                    mode: payload.mode.clone(),
+                    expires_at: now + ttl as i64,
+                },
+            );
         }
 
-        info!("File locked: {} ({}) by {}", payload.path, payload.mode, session_id);
-        let ack = AckPayload { stream_id: frame.stream_id, seq_num: frame.seq_num };
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num,
-            Bytes::from(serde_json::to_vec(&ack)?))])
+        info!(
+            "File locked: {} ({}) by {}",
+            payload.path, payload.mode, session_id
+        );
+        let ack = AckPayload {
+            stream_id: frame.stream_id,
+            seq_num: frame.seq_num,
+        };
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            frame.seq_num,
+            Bytes::from(serde_json::to_vec(&ack)?),
+        )])
     }
 
     async fn handle_delta_sync(
-        frame: &Frame, config: &ServerConfig, _delta_computer: &DeltaComputer,
+        frame: &Frame,
+        config: &ServerConfig,
+        _delta_computer: &DeltaComputer,
     ) -> Result<Vec<Frame>> {
         let payload: DeltaSyncPayload = serde_json::from_slice(&frame.payload)?;
         let file_path = shared_path!(config, &payload.path, frame, frame.seq_num);
@@ -892,44 +1155,71 @@ impl LspServer {
             let sig = FileSignature::compute(&data, payload.block_size);
             (true, sig)
         } else {
-            (false, FileSignature { block_size: payload.block_size, file_size: 0, blocks: vec![] })
+            (
+                false,
+                FileSignature {
+                    block_size: payload.block_size,
+                    file_size: 0,
+                    blocks: vec![],
+                },
+            )
         };
 
-        let blocks: Vec<DeltaBlockChecksum> = signature.blocks.iter().map(|b| {
-            DeltaBlockChecksum { index: b.index, weak: b.weak, strong: hex::encode(&b.strong) }
-        }).collect();
+        let blocks: Vec<DeltaBlockChecksum> = signature
+            .blocks
+            .iter()
+            .map(|b| DeltaBlockChecksum {
+                index: b.index,
+                weak: b.weak,
+                strong: hex::encode(b.strong),
+            })
+            .collect();
 
         let resp = DeltaSyncRespPayload {
             path: payload.path,
             block_size: signature.block_size,
             file_size: signature.file_size,
-            blocks, exists,
+            blocks,
+            exists,
         };
 
-        Ok(vec![Frame::new(FrameType::DeltaSyncResp, frame.stream_id, frame.seq_num,
-            Bytes::from(serde_json::to_vec(&resp)?))])
+        Ok(vec![Frame::new(
+            FrameType::DeltaSyncResp,
+            frame.stream_id,
+            frame.seq_num,
+            Bytes::from(serde_json::to_vec(&resp)?),
+        )])
     }
 
     async fn handle_delta_data(
-        frame: &Frame, config: &ServerConfig, delta_computer: &DeltaComputer,
+        frame: &Frame,
+        config: &ServerConfig,
+        delta_computer: &DeltaComputer,
     ) -> Result<Vec<Frame>> {
         // 二进制解码
         let (path, source_size, delta_size, instructions_payload) =
             crate::protocol::decode_delta_data(&frame.payload)?;
         let file_path = shared_path!(config, &path, frame, frame.seq_num);
 
-        let old_data = if file_path.exists() { fs::read(&file_path).await? } else { vec![] };
+        let old_data = if file_path.exists() {
+            fs::read(&file_path).await?
+        } else {
+            vec![]
+        };
 
-        let instructions: Vec<crate::diff_transfer::DeltaInstruction> = instructions_payload.iter().map(|inst| {
-            match inst {
+        let instructions: Vec<crate::diff_transfer::DeltaInstruction> = instructions_payload
+            .iter()
+            .map(|inst| match inst {
                 DeltaInstructionPayload::Copy { block_index } => {
-                    crate::diff_transfer::DeltaInstruction::Copy { block_index: *block_index }
+                    crate::diff_transfer::DeltaInstruction::Copy {
+                        block_index: *block_index,
+                    }
                 }
                 DeltaInstructionPayload::Literal { data } => {
                     crate::diff_transfer::DeltaInstruction::Literal { data: data.clone() }
                 }
-            }
-        }).collect();
+            })
+            .collect();
 
         let delta = crate::diff_transfer::Delta {
             instructions,
@@ -946,11 +1236,17 @@ impl LspServer {
 
         info!("Delta applied: {} ({} bytes)", path, new_data.len());
 
-        Ok(vec![Frame::new(FrameType::Ack, frame.stream_id, frame.seq_num, Bytes::new())])
+        Ok(vec![Frame::new(
+            FrameType::Ack,
+            frame.stream_id,
+            frame.seq_num,
+            Bytes::new(),
+        )])
     }
 
     async fn handle_window_update(
-        frame: &Frame, session_id: &str,
+        frame: &Frame,
+        session_id: &str,
         sessions: &Arc<RwLock<HashMap<String, Session>>>,
     ) -> Result<Vec<Frame>> {
         let payload: WindowUpdatePayload = serde_json::from_slice(&frame.payload)?;
@@ -964,7 +1260,10 @@ impl LspServer {
             }
         }
 
-        debug!("Window update: stream {} -> {} bytes", payload.stream_id, payload.window_size);
+        debug!(
+            "Window update: stream {} -> {} bytes",
+            payload.stream_id, payload.window_size
+        );
         Ok(vec![])
     }
 }

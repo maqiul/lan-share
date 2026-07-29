@@ -36,6 +36,7 @@ pub struct AppState {
 }
 
 /// 启动 HTTP 服务器
+#[allow(clippy::too_many_arguments)]
 pub async fn start_web_server(
     port: u16,
     shared_dir: PathBuf,
@@ -69,12 +70,27 @@ pub async fn start_web_server(
         .route("/api/logout", post(crate::api::logout))
         .route("/api/me", get(crate::api::me))
         .route("/api/change-password", post(crate::api::change_password))
-        .route("/api/admin/users", get(crate::api::list_users).post(crate::api::create_user))
-        .route("/api/admin/users/{id}", delete(crate::api::delete_user).put(crate::api::update_user))
-        .route("/api/admin/users/{id}/password", put(crate::api::reset_user_password))
-        .route("/api/admin/settings", get(crate::api::get_admin_settings).put(crate::api::set_admin_settings))
+        .route(
+            "/api/admin/users",
+            get(crate::api::list_users).post(crate::api::create_user),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            delete(crate::api::delete_user).put(crate::api::update_user),
+        )
+        .route(
+            "/api/admin/users/{id}/password",
+            put(crate::api::reset_user_password),
+        )
+        .route(
+            "/api/admin/settings",
+            get(crate::api::get_admin_settings).put(crate::api::set_admin_settings),
+        )
         .route("/api/admin/restart", post(crate::api::restart_server))
-        .route("/api/user/settings", get(crate::api::get_user_settings).put(crate::api::set_user_settings))
+        .route(
+            "/api/user/settings",
+            get(crate::api::get_user_settings).put(crate::api::set_user_settings),
+        )
         .route("/api/zip", get(crate::api::download_zip))
         .route("/api/share", post(crate::api::create_share))
         .route("/api/shares", get(crate::api::list_shares))
@@ -83,7 +99,10 @@ pub async fn start_web_server(
         .route("/api/discover", get(crate::api::discover_servers))
         .route("/api/admin/audit-logs", get(crate::api::get_audit_logs))
         // 文件浏览器 API
-        .route("/api/files", get(crate::files::list_files).delete(crate::files::delete_file))
+        .route(
+            "/api/files",
+            get(crate::files::list_files).delete(crate::files::delete_file),
+        )
         .route("/api/files/download", get(crate::files::download_file))
         .route("/api/files/preview", get(crate::files::preview_file))
         .route("/api/files/upload", post(crate::files::upload_file))
@@ -102,7 +121,11 @@ pub async fn start_web_server(
     info!("Web server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -139,6 +162,7 @@ async fn serve_files_ui(State(state): State<Arc<AppState>>) -> Response {
 /// - admin → 全局 shared_dir（可访问所有用户文件）
 /// - 简易模式用户 (id=0) → 全局 shared_dir
 /// - 普通用户 → 自己的 shared_dir（绝对路径直接用，相对路径相对全局 shared_dir）
+///
 /// 目录不存在时自动创建
 pub(crate) fn resolve_shared_dir(state: &AppState, user: &crate::db::User) -> PathBuf {
     let dir = if user.role == "admin" || user.id == 0 {
@@ -164,9 +188,10 @@ pub(crate) fn safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
     let full = base.join(&rel);
     let canonical_base = base.canonicalize().ok()?;
     let canonical_full = full.canonicalize().ok().or_else(|| {
-        full.parent()?.canonicalize().ok().map(|p| {
-            p.join(full.file_name().unwrap_or_default())
-        })
+        full.parent()?
+            .canonicalize()
+            .ok()
+            .map(|p| p.join(full.file_name().unwrap_or_default()))
     })?;
 
     if canonical_full.starts_with(&canonical_base) {

@@ -31,17 +31,29 @@ impl User {
     }
 
     /// 是否可读（列目录/下载）
-    pub fn can_read(&self) -> bool { self.can("read") }
+    pub fn can_read(&self) -> bool {
+        self.can("read")
+    }
     /// 是否可写（上传/创建文件）
-    pub fn can_write(&self) -> bool { self.can("write") }
+    pub fn can_write(&self) -> bool {
+        self.can("write")
+    }
     /// 是否可删除
-    pub fn can_delete(&self) -> bool { self.can("delete") }
+    pub fn can_delete(&self) -> bool {
+        self.can("delete")
+    }
     /// 是否可重命名
-    pub fn can_rename(&self) -> bool { self.can("rename") }
+    pub fn can_rename(&self) -> bool {
+        self.can("rename")
+    }
     /// 是否可创建分享链接
-    pub fn can_share(&self) -> bool { self.can("share") }
+    pub fn can_share(&self) -> bool {
+        self.can("share")
+    }
     /// 是否可创建目录
-    pub fn can_mkdir(&self) -> bool { self.can("mkdir") }
+    pub fn can_mkdir(&self) -> bool {
+        self.can("mkdir")
+    }
 }
 
 /// 数据库包装（线程安全）
@@ -54,7 +66,9 @@ impl Database {
     pub fn open(path: &Path) -> Result<Self, rusqlite::Error> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
-        let db = Self { conn: Mutex::new(conn) };
+        let db = Self {
+            conn: Mutex::new(conn),
+        };
         db.init_schema()?;
         db.ensure_admin()?;
         Ok(db)
@@ -174,10 +188,11 @@ impl Database {
     /// 确保 admin 账号存在（admin/admin123，首次登录强制改密）
     fn ensure_admin(&self) -> Result<(), rusqlite::Error> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM users WHERE username = 'admin'", [], |r| {
-                r.get(0)
-            })?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE username = 'admin'",
+            [],
+            |r| r.get(0),
+        )?;
         if count == 0 {
             let pw_hash = hash("admin123", DEFAULT_COST).unwrap_or_default();
             conn.execute(
@@ -231,7 +246,10 @@ impl Database {
         let token = uuid::Uuid::new_v4().to_string();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 登录时顺便清理过期会话（低频操作，不影响 verify 性能）
-        let _ = conn.execute("DELETE FROM sessions WHERE expires_at < datetime('now')", []);
+        let _ = conn.execute(
+            "DELETE FROM sessions WHERE expires_at < datetime('now')",
+            [],
+        );
         conn.execute(
             "INSERT INTO sessions (token, user_id, expires_at)
              VALUES (?1, ?2, datetime('now', '+24 hours'))",
@@ -445,7 +463,9 @@ impl Database {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 禁止删除最后一个 admin
         let admin_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0);
         let is_admin: bool = conn
             .query_row(
@@ -473,8 +493,11 @@ impl Database {
     ) -> Result<(), String> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(r) = role {
-            conn.execute("UPDATE users SET role = ?1 WHERE id = ?2", params![r, user_id])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE users SET role = ?1 WHERE id = ?2",
+                params![r, user_id],
+            )
+            .map_err(|e| e.to_string())?;
         }
         if let Some(dir_opt) = shared_dir {
             conn.execute(
@@ -549,11 +572,15 @@ impl Database {
     /// 读取全部全局设置
     pub fn get_all_admin_settings(&self) -> std::collections::HashMap<String, String> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare("SELECT key, value FROM admin_settings").unwrap();
-        stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .collect()
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM admin_settings")
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect()
     }
 
     // 用户设置（user_settings）
@@ -595,11 +622,15 @@ impl Database {
     // 分享链接
 
     /// 创建分享链接，返回 token
-    pub fn create_share(&self, user_id: i64, path: &str, expires_hours: Option<i64>, max_downloads: Option<i64>) -> String {
+    pub fn create_share(
+        &self,
+        user_id: i64,
+        path: &str,
+        expires_hours: Option<i64>,
+        max_downloads: Option<i64>,
+    ) -> String {
         let token = uuid::Uuid::new_v4().simple().to_string();
-        let expires_at = expires_hours.map(|h| {
-            chrono::Utc::now() + chrono::Duration::hours(h)
-        });
+        let expires_at = expires_hours.map(|h| chrono::Utc::now() + chrono::Duration::hours(h));
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
             "INSERT INTO shares (token, user_id, path, expires_at, max_downloads) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -615,6 +646,7 @@ impl Database {
     }
 
     /// 验证分享链接，返回 (user_id, path)，过期或不存在返回 None
+    #[allow(clippy::type_complexity)]
     pub fn verify_share(&self, token: &str) -> Option<(i64, String)> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let result: Result<(i64, String, Option<String>, Option<i64>, i64), _> = conn.query_row(
@@ -665,7 +697,12 @@ impl Database {
             .prepare("SELECT token, path, expires_at, download_count FROM shares WHERE user_id = ?1 ORDER BY created_at DESC")
             .unwrap();
         stmt.query_map(params![user_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })
         .unwrap()
         .filter_map(|r| r.ok())
@@ -675,7 +712,15 @@ impl Database {
     // 审计日志
 
     /// 记录审计日志
-    pub fn audit_log(&self, user_id: Option<i64>, username: &str, action: &str, path: Option<&str>, detail: Option<&str>, ip: Option<&str>) {
+    pub fn audit_log(
+        &self,
+        user_id: Option<i64>,
+        username: &str,
+        action: &str,
+        path: Option<&str>,
+        detail: Option<&str>,
+        ip: Option<&str>,
+    ) {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let _ = conn.execute(
             "INSERT INTO audit_log (user_id, username, action, path, detail, ip) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

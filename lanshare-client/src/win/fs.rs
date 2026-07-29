@@ -10,8 +10,8 @@
 //! 适用于 LAN 场景的中小文件；超大文件写入会占用相应内存。
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
@@ -20,15 +20,13 @@ use windows::Win32::Foundation::{
     STATUS_ACCESS_DENIED, STATUS_DIRECTORY_NOT_EMPTY, STATUS_END_OF_FILE,
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
 };
-use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
 use winfsp::filesystem::{
     DirInfo, DirMarker, FileInfo, FileSecurity, FileSystemContext, OpenFileInfo, VolumeInfo,
     WideNameInfo,
 };
 
-use lanshare_client::lsp_client::{DirEntry, StatResp, LspShareClient};
+use lanshare_client::lsp_client::{DirEntry, LspShareClient, StatResp};
 
 // ── Win32 常量（create_options / granted_access / cleanup flags）──
 /// create_options：目标为目录
@@ -142,11 +140,13 @@ impl LanShareFs {
     }
 
     fn next_index_number(&self) -> u64 {
-        self.next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.next_index
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     fn next_cache_seq(&self) -> u64 {
-        self.cache_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.cache_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 将 WinFsp 路径（U16CStr，反斜杠分隔）转为 WSP 路径（正斜杠）
@@ -168,7 +168,11 @@ impl LanShareFs {
         FileInfo {
             file_attributes: attrs,
             reparse_tag: 0,
-            allocation_size: if stat.is_dir { 0 } else { (stat.size + 511) / 512 * 512 },
+            allocation_size: if stat.is_dir {
+                0
+            } else {
+                stat.size.div_ceil(512) * 512
+            },
             file_size: stat.size,
             creation_time: mtime,
             last_access_time: mtime,
@@ -204,10 +208,13 @@ impl LanShareFs {
         {
             let mut cache = self.dir_cache.write();
             cache.retain(|_, e| now - e.cached_at < DIR_CACHE_TTL_SECS);
-            cache.insert(path.to_string(), DirCacheEntry {
-                entries: entries.clone(),
-                cached_at: now,
-            });
+            cache.insert(
+                path.to_string(),
+                DirCacheEntry {
+                    entries: entries.clone(),
+                    cached_at: now,
+                },
+            );
         }
 
         Ok(entries)
@@ -219,7 +226,9 @@ impl LanShareFs {
         {
             let cache = self.file_cache.read();
             if let Some(entry) = cache.get(path) {
-                entry.last_access.store(self.next_cache_seq(), std::sync::atomic::Ordering::Relaxed);
+                entry
+                    .last_access
+                    .store(self.next_cache_seq(), std::sync::atomic::Ordering::Relaxed);
                 if (offset as usize) < entry.data.len() {
                     let end = ((offset as usize) + len).min(entry.data.len());
                     return Ok(entry.data[offset as usize..end].to_vec());
@@ -249,10 +258,13 @@ impl LanShareFs {
                     None => break,
                 }
             }
-            cache.insert(path.to_string(), FileCacheEntry {
-                data: data.clone(),
-                last_access: std::sync::atomic::AtomicU64::new(self.next_cache_seq()),
-            });
+            cache.insert(
+                path.to_string(),
+                FileCacheEntry {
+                    data: data.clone(),
+                    last_access: std::sync::atomic::AtomicU64::new(self.next_cache_seq()),
+                },
+            );
         }
 
         if (offset as usize) < data.len() {
@@ -268,9 +280,9 @@ impl LanShareFs {
         // SDDL: 所有人可读可写可删除（0x1201FF = FILE_GENERIC_READ|WRITE|DELETE|READ_CONTROL|SYNCHRONIZE）。
         // 写权限的实际门控由服务端会话权限 + 本卷 writable 标志负责，此处仅放开本地 ACL 限制。
         // 使用 Win32 API 转换
+        use windows::core::PCWSTR;
         use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
         use windows::Win32::Security::{GetSecurityDescriptorLength, PSECURITY_DESCRIPTOR};
-        use windows::core::PCWSTR;
 
         let sddl = "O:BAG:BAD:P(A;;0x1201FF;;;WD)";
         let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
@@ -291,14 +303,12 @@ impl LanShareFs {
         }
 
         let len = unsafe { GetSecurityDescriptorLength(descriptor) } as usize;
-        let bytes = unsafe {
-            std::slice::from_raw_parts(descriptor.0 as *const u8, len)
-        }.to_vec();
+        let bytes = unsafe { std::slice::from_raw_parts(descriptor.0 as *const u8, len) }.to_vec();
 
         unsafe {
-            let _ = windows::Win32::Foundation::LocalFree(
-                Some(windows::Win32::Foundation::HLOCAL(descriptor.0)),
-            );
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(descriptor.0),
+            ));
         }
 
         bytes
@@ -352,9 +362,9 @@ impl FileSystemContext for LanShareFs {
                 exists: true,
             }
         } else {
-            self.client.stat(&path).map_err(|_| {
-                winfsp::FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND.0)
-            })?
+            self.client
+                .stat(&path)
+                .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND.0))?
         };
 
         let attributes = if stat.is_dir {
@@ -408,9 +418,9 @@ impl FileSystemContext for LanShareFs {
                 exists: true,
             }
         } else {
-            self.client.stat(&path).map_err(|_| {
-                winfsp::FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND.0)
-            })?
+            self.client
+                .stat(&path)
+                .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_OBJECT_NAME_NOT_FOUND.0))?
         };
 
         if !stat.exists {
@@ -427,13 +437,15 @@ impl FileSystemContext for LanShareFs {
             && !stat.is_dir
             && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0
             && stat.size <= MAX_WRITE_BUF_SIZE;
-        if self.client.can("write") && !stat.is_dir
+        if self.client.can("write")
+            && !stat.is_dir
             && (granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA)) != 0
             && stat.size > MAX_WRITE_BUF_SIZE
         {
             crate::discovery::log(&format!(
                 "大文件保护：{} ({} MB) 超过写回上限，以只读打开",
-                path, stat.size / 1024 / 1024
+                path,
+                stat.size / 1024 / 1024
             ));
         }
         let write_buf = if can_write {
@@ -593,7 +605,11 @@ impl FileSystemContext for LanShareFs {
             FILE_ATTRIBUTE_NORMAL.0
         };
         file_info.file_attributes = attrs;
-        file_info.allocation_size = if context.is_dir { 0 } else { (size + 511) / 512 * 512 };
+        file_info.allocation_size = if context.is_dir {
+            0
+        } else {
+            size.div_ceil(512) * 512
+        };
         file_info.file_size = size;
         file_info.creation_time = context.mtime;
         file_info.last_access_time = context.mtime;
@@ -629,7 +645,8 @@ impl FileSystemContext for LanShareFs {
             return Err(winfsp::FspError::NTSTATUS(STATUS_END_OF_FILE.0));
         }
 
-        let data = self.read_file_cached(&context.path, offset, buffer.len())
+        let data = self
+            .read_file_cached(&context.path, offset, buffer.len())
             .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
 
         let len = data.len().min(buffer.len());
@@ -648,7 +665,8 @@ impl FileSystemContext for LanShareFs {
             return Err(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0));
         }
 
-        let entries = self.list_dir_cached(&context.path)
+        let entries = self
+            .list_dir_cached(&context.path)
             .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_OBJECT_PATH_NOT_FOUND.0))?;
 
         let mut cursor = 0u32;
@@ -669,7 +687,8 @@ impl FileSystemContext for LanShareFs {
             fi.last_access_time = fi.creation_time;
             fi.last_write_time = fi.creation_time;
             fi.change_time = fi.creation_time;
-            dir_info.set_name_raw([b'.' as u16].as_slice())
+            dir_info
+                .set_name_raw([b'.' as u16].as_slice())
                 .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
                 return Ok(cursor);
@@ -684,7 +703,8 @@ impl FileSystemContext for LanShareFs {
             fi.last_access_time = fi.creation_time;
             fi.last_write_time = fi.creation_time;
             fi.change_time = fi.creation_time;
-            dir_info.set_name_raw([b'.' as u16, b'.' as u16].as_slice())
+            dir_info
+                .set_name_raw([b'.' as u16, b'.' as u16].as_slice())
                 .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
                 return Ok(cursor);
@@ -700,7 +720,11 @@ impl FileSystemContext for LanShareFs {
             if name == "." || name == ".." {
                 0
             } else {
-                entries.iter().position(|e| &e.name == name).map(|i| i + 1).unwrap_or(0)
+                entries
+                    .iter()
+                    .position(|e| &e.name == name)
+                    .map(|i| i + 1)
+                    .unwrap_or(0)
             }
         } else {
             0
@@ -715,7 +739,11 @@ impl FileSystemContext for LanShareFs {
             } else {
                 FILE_ATTRIBUTE_NORMAL.0
             };
-            fi.allocation_size = if entry.is_dir { 0 } else { (entry.size + 511) / 512 * 512 };
+            fi.allocation_size = if entry.is_dir {
+                0
+            } else {
+                entry.size.div_ceil(512) * 512
+            };
             fi.file_size = entry.size;
             fi.creation_time = mtime;
             fi.last_access_time = mtime;
@@ -724,7 +752,8 @@ impl FileSystemContext for LanShareFs {
             fi.index_number = self.next_index_number();
 
             let name_wide: Vec<u16> = entry.name.encode_utf16().collect();
-            dir_info.set_name_raw(name_wide.as_slice())
+            dir_info
+                .set_name_raw(name_wide.as_slice())
                 .map_err(|_| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
 
             if !dir_info.append_to_buffer(buffer, &mut cursor) {
@@ -748,7 +777,7 @@ impl FileSystemContext for LanShareFs {
         let wb = context
             .write_buf
             .as_ref()
-            .ok_or_else(|| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+            .ok_or(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
         let mut buf = wb.lock();
 
         // 确定写入偏移：write_to_eof 表示追加到末尾
@@ -780,7 +809,7 @@ impl FileSystemContext for LanShareFs {
         let now = now_filetime();
         let new_size = buf.data.len() as u64;
         file_info.file_size = new_size;
-        file_info.allocation_size = (new_size + 511) / 512 * 512;
+        file_info.allocation_size = new_size.div_ceil(512) * 512;
         file_info.last_write_time = now;
         file_info.change_time = now;
 
@@ -797,7 +826,7 @@ impl FileSystemContext for LanShareFs {
         let wb = context
             .write_buf
             .as_ref()
-            .ok_or_else(|| winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
+            .ok_or(winfsp::FspError::NTSTATUS(STATUS_ACCESS_DENIED.0))?;
         if set_allocation_size {
             // 仅调整分配大小，不改动数据
             file_info.allocation_size = new_size;
@@ -806,7 +835,7 @@ impl FileSystemContext for LanShareFs {
             buf.data.resize(new_size as usize, 0);
             buf.dirty = true;
             file_info.file_size = new_size;
-            file_info.allocation_size = (new_size + 511) / 512 * 512;
+            file_info.allocation_size = new_size.div_ceil(512) * 512;
             let now = now_filetime();
             file_info.last_write_time = now;
             file_info.change_time = now;
@@ -871,7 +900,9 @@ impl FileSystemContext for LanShareFs {
     fn cleanup(&self, context: &Self::FileContext, _file_name: Option<&U16CStr>, flags: u32) {
         // 删除：set_delete(true) 或 FILE_DELETE_ON_CLOSE 触发
         if flags & FSP_CLEANUP_DELETE != 0
-            || context.delete_on_close.load(std::sync::atomic::Ordering::Relaxed)
+            || context
+                .delete_on_close
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             let _ = self.client.delete(&context.path, context.is_dir);
             if context.is_dir {
@@ -896,7 +927,11 @@ impl FileSystemContext for LanShareFs {
                     self.invalidate_dir_parent(&context.path);
                     crate::discovery::log(&format!("写回完成: {}", context.path));
                 } else {
-                    crate::discovery::log(&format!("写回失败: {} - {:?}", context.path, result.err()));
+                    crate::discovery::log(&format!(
+                        "写回失败: {} - {:?}",
+                        context.path,
+                        result.err()
+                    ));
                 }
             }
         }
@@ -910,7 +945,7 @@ impl FileSystemContext for LanShareFs {
     fn get_volume_info(&self, out_volume_info: &mut VolumeInfo) -> winfsp::Result<()> {
         out_volume_info.total_size = 1024 * 1024 * 1024 * 1024; // 1 TB 虚拟
         out_volume_info.free_size = 512 * 1024 * 1024 * 1024; // 512 GB 虚拟
-        out_volume_info.set_volume_label(&std::ffi::OsString::from("LanShare"));
+        out_volume_info.set_volume_label(std::ffi::OsString::from("LanShare"));
         Ok(())
     }
 
@@ -952,7 +987,7 @@ impl FileSystemContext for LanShareFs {
                     let now = now_filetime();
                     let size = buf.data.len() as u64;
                     file_info.file_size = size;
-                    file_info.allocation_size = (size + 511) / 512 * 512;
+                    file_info.allocation_size = size.div_ceil(512) * 512;
                     file_info.last_write_time = now;
                     file_info.change_time = now;
                 }

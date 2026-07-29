@@ -63,7 +63,8 @@ struct InnerLsp {
 /// 建立一个新的 LSP3 客户端（UDP 连接 + 握手 + 认证），返回客户端与服务端授予的权限字符串
 async fn build_client(addr: &str, auth: &LspAuth) -> Result<(LspClient, String), LspError> {
     let device_id = format!("lanshare-mount-{}", std::process::id());
-    let mut client = LspClient::connect(addr, device_id, "LanShare Mount Client".to_string()).await?;
+    let mut client =
+        LspClient::connect(addr, device_id, "LanShare Mount Client".to_string()).await?;
     client.handshake().await?;
     let permission = match auth {
         LspAuth::Pin(pin) => client.authenticate(pin).await?,
@@ -243,7 +244,8 @@ impl LspShareClient {
 
     /// 下载文件（从 offset 开始读到末尾）
     pub fn download(&self, path: &str, offset: u64) -> Result<Vec<u8>, String> {
-        self.rt.block_on(self.with_retry(|c| async move { c.read_range(path, offset, 0).await }))
+        self.rt
+            .block_on(self.with_retry(|c| async move { c.read_range(path, offset, 0).await }))
     }
 
     /// 上传内存数据到远端文件（整文件替换）。供 WinFsp 写回缓存使用。
@@ -257,32 +259,33 @@ impl LspShareClient {
 
     /// 创建目录（含中间路径）
     pub fn mkdir(&self, path: &str) -> Result<(), String> {
-        self.rt.block_on(self.with_retry(|c| async move { c.mkdir(path).await }))
+        self.rt
+            .block_on(self.with_retry(|c| async move { c.mkdir(path).await }))
     }
 
     /// 删除文件或目录（目录需 recursive=true）
     pub fn delete(&self, path: &str, recursive: bool) -> Result<(), String> {
-        self.rt.block_on(self.with_retry(|c| async move { c.delete_file(path, recursive).await }))
+        self.rt
+            .block_on(self.with_retry(|c| async move { c.delete_file(path, recursive).await }))
     }
 
     /// 重命名/移动
     pub fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
-        self.rt.block_on(self.with_retry(|c| async move { c.rename(old_path, new_path).await }))
+        self.rt
+            .block_on(self.with_retry(|c| async move { c.rename(old_path, new_path).await }))
     }
 
     /// 请求文件锁（exclusive / shared），TTL 秒后自动过期。
     /// 服务端拒绝时返回 Err（文件已被其他客户端锁定）。
     pub fn lock_file(&self, path: &str, mode: &str, ttl_secs: u32) -> Result<(), String> {
-        self.rt.block_on(self.with_retry(|c| async move {
-            c.lock_file(path, mode, ttl_secs).await
-        }))
+        self.rt
+            .block_on(self.with_retry(|c| async move { c.lock_file(path, mode, ttl_secs).await }))
     }
 
     /// 释放文件锁
     pub fn unlock_file(&self, path: &str) -> Result<(), String> {
-        self.rt.block_on(self.with_retry(|c| async move {
-            c.unlock_file(path).await
-        }))
+        self.rt
+            .block_on(self.with_retry(|c| async move { c.unlock_file(path).await }))
     }
 }
 

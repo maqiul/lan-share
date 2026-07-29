@@ -74,7 +74,10 @@ pub fn scan_lan(timeout_ms: u64) -> Vec<DiscoveredServer> {
                 if let Ok(info) = serde_json::from_slice::<DiscoveredServer>(&buf[..len]) {
                     let mut info = info;
                     info.ip = src.ip().to_string();
-                    if !results.iter().any(|r: &DiscoveredServer| r.addr() == info.addr()) {
+                    if !results
+                        .iter()
+                        .any(|r: &DiscoveredServer| r.addr() == info.addr())
+                    {
                         results.push(info);
                     }
                 }
@@ -109,7 +112,7 @@ pub fn read_password(prompt: &str) -> String {
             io::stdin().read_line(&mut line).ok();
             let _ = SetConsoleMode(handle, mode);
             println!();
-            return line.trim().to_string();
+            line.trim().to_string()
         }
     }
 
@@ -209,14 +212,25 @@ pub fn interactive_discover() -> Option<ResolvedConfig> {
     let lsp_port = servers[choice].lsp_port;
     println!();
     println!("  已选择: {} ({})", servers[choice].name, server);
-    println!("  模式: {}", if simple_mode { "简易模式（PIN 码）" } else { "账号模式（用户名+密码）" });
+    println!(
+        "  模式: {}",
+        if simple_mode {
+            "简易模式（PIN 码）"
+        } else {
+            "账号模式（用户名+密码）"
+        }
+    );
     println!();
 
     interactive_auth(server, Some(simple_mode), lsp_port)
 }
 
 /// 交互认证：根据服务器模式自动选择认证方式 → 输入凭据
-pub fn interactive_auth(server: String, known_mode: Option<bool>, lsp_port: u16) -> Option<ResolvedConfig> {
+pub fn interactive_auth(
+    server: String,
+    known_mode: Option<bool>,
+    lsp_port: u16,
+) -> Option<ResolvedConfig> {
     let auth_mode = match known_mode {
         Some(true) => {
             println!("  🔑 该服务器为简易模式，请输入 PIN 码");
@@ -269,10 +283,7 @@ pub fn interactive_auth(server: String, known_mode: Option<bool>, lsp_port: u16)
         _ => unreachable!(),
     };
 
-    let mount = {
-        let input = read_line("  挂载点 (直接回车=默认): ");
-        input
-    };
+    let mount = { read_line("  挂载点 (直接回车=默认): ") };
 
     let label = {
         let input = read_line("  卷标名称 (直接回车=LanShare): ");
@@ -394,7 +405,8 @@ pub fn protect_secret(plain: &str) -> String {
     };
 
     if res.is_ok() && !out_blob.pbData.is_null() {
-        let cipher = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
+        let cipher =
+            unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
         let enc = base64::engine::general_purpose::STANDARD.encode(cipher);
         unsafe {
             let _ = LocalFree(Some(HLOCAL(out_blob.pbData as _)));
@@ -437,7 +449,8 @@ pub fn unprotect_secret(value: &str) -> String {
     };
 
     if res.is_ok() && !out_blob.pbData.is_null() {
-        let plain_bytes = unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
+        let plain_bytes =
+            unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) };
         let plain = String::from_utf8_lossy(plain_bytes).into_owned();
         unsafe {
             let _ = LocalFree(Some(HLOCAL(out_blob.pbData as _)));
@@ -563,7 +576,11 @@ pub fn log(msg: &str) {
         .unwrap_or_default()
         .as_secs();
     if let Some(path) = log_file_path() {
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "[{}] {}", format_unix_utc(ts), msg);
         }
     }
@@ -649,8 +666,7 @@ impl ResolvedConfig {
 
     /// 解析配置：CLI > 配置文件 > 交互发现
     pub fn resolve(args: Args) -> Result<Self, String> {
-        let has_cli_auth =
-            args.pin.is_some() || args.username.is_some() || args.token.is_some();
+        let has_cli_auth = args.pin.is_some() || args.username.is_some() || args.token.is_some();
 
         if has_cli_auth {
             return Ok(ResolvedConfig {
@@ -674,7 +690,13 @@ impl ResolvedConfig {
                     username: cfg.username,
                     password: cfg.password,
                     token: cfg.token,
-                    mount: if args.mount.is_some() { args.mount.unwrap() } else if cfg.mount.is_empty() { default_mount() } else { cfg.mount },
+                    mount: if let Some(m) = args.mount {
+                        m
+                    } else if cfg.mount.is_empty() {
+                        default_mount()
+                    } else {
+                        cfg.mount
+                    },
                     label: args.label.unwrap_or(cfg.label),
                 });
             }

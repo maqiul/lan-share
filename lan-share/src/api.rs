@@ -101,7 +101,9 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
 /// 验证 Bearer token，返回 User（简易模式下 PIN 也放行）
 pub fn auth_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
     let token = extract_token(headers)?;
-    let simple_mode = state.db.get_admin_setting("simple_mode")
+    let simple_mode = state
+        .db
+        .get_admin_setting("simple_mode")
         .map(|v| v != "false")
         .unwrap_or(true);
     if simple_mode && token == state.pin {
@@ -158,7 +160,10 @@ fn json_resp(status: StatusCode, body: &str) -> Response {
 }
 
 fn ok_json<T: Serialize>(data: &T) -> Response {
-    json_resp(StatusCode::OK, &serde_json::to_string(data).unwrap_or_default())
+    json_resp(
+        StatusCode::OK,
+        &serde_json::to_string(data).unwrap_or_default(),
+    )
 }
 
 /// 密码复杂性验证：至少 8 位，包含大写、小写、数字中的至少 2 种
@@ -169,7 +174,10 @@ fn validate_password(pwd: &str) -> Result<(), String> {
     let has_upper = pwd.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = pwd.chars().any(|c| c.is_ascii_lowercase());
     let has_digit = pwd.chars().any(|c| c.is_ascii_digit());
-    let kinds = [has_upper, has_lower, has_digit].iter().filter(|&&x| x).count();
+    let kinds = [has_upper, has_lower, has_digit]
+        .iter()
+        .filter(|&&x| x)
+        .count();
     if kinds < 2 {
         return Err("密码须包含大写字母、小写字母、数字中的至少 2 种".to_string());
     }
@@ -180,7 +188,9 @@ fn validate_password(pwd: &str) -> Result<(), String> {
 
 /// GET /api/mode — 获取当前认证模式（无需登录）
 pub async fn get_mode(State(state): State<Arc<AppState>>) -> Response {
-    let simple_mode = state.db.get_admin_setting("simple_mode")
+    let simple_mode = state
+        .db
+        .get_admin_setting("simple_mode")
         .map(|v| v != "false")
         .unwrap_or(true);
     ok_json(&serde_json::json!({
@@ -190,42 +200,72 @@ pub async fn get_mode(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// POST /api/login
-pub async fn login(State(state): State<Arc<AppState>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(req): Json<LoginReq>) -> Response {
+pub async fn login(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<LoginReq>,
+) -> Response {
     let client_ip = addr.ip().to_string();
 
     // 简易模式下只允许管理员登录（用于进入设置界面）
-    let simple_mode = state.db.get_admin_setting("simple_mode")
+    let simple_mode = state
+        .db
+        .get_admin_setting("simple_mode")
         .map(|v| v != "false")
         .unwrap_or(true);
 
     // IP 级限流：同一 IP 15分钟内失败 20 次则锁定
     let (ip_locked, ip_remain) = state.db.is_ip_locked(&client_ip);
     if ip_locked {
-        return json_resp(StatusCode::TOO_MANY_REQUESTS,
-            &format!(r#"{{"error":"请求过于频繁，请 {} 秒后重试"}}"#, ip_remain));
+        return json_resp(
+            StatusCode::TOO_MANY_REQUESTS,
+            &format!(r#"{{"error":"请求过于频繁，请 {} 秒后重试"}}"#, ip_remain),
+        );
     }
 
     // 账号级限流：同一账号 15分钟内失败 5 次则锁定
     let (locked, remain_secs) = state.db.is_account_locked(&req.username);
     if locked {
-        return json_resp(StatusCode::TOO_MANY_REQUESTS,
-            &format!(r#"{{"error":"登录失败次数过多，请 {} 秒后重试"}}"#, remain_secs));
+        return json_resp(
+            StatusCode::TOO_MANY_REQUESTS,
+            &format!(
+                r#"{{"error":"登录失败次数过多，请 {} 秒后重试"}}"#,
+                remain_secs
+            ),
+        );
     }
 
     match state.db.verify_login(&req.username, &req.password) {
         Some(user) => {
             // 简易模式下只允许管理员登录
             if simple_mode && user.role != "admin" {
-                return json_resp(StatusCode::FORBIDDEN, r#"{"error":"简易模式下请使用 PIN 码连接"}"#);
+                return json_resp(
+                    StatusCode::FORBIDDEN,
+                    r#"{"error":"简易模式下请使用 PIN 码连接"}"#,
+                );
             }
             state.db.clear_failed_attempts(&req.username);
-            state.db.record_login_attempt(&req.username, Some(&client_ip), true);
+            state
+                .db
+                .record_login_attempt(&req.username, Some(&client_ip), true);
             let token = match state.db.create_session(user.id) {
                 Ok(t) => t,
-                Err(e) => return json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
+                Err(e) => {
+                    return json_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!(r#"{{"error":"{e}"}}"#),
+                    )
+                }
             };
             // 审计日志：登录成功
-            state.db.audit_log(Some(user.id), &req.username, "login", None, Some("登录成功"), None);
+            state.db.audit_log(
+                Some(user.id),
+                &req.username,
+                "login",
+                None,
+                Some("登录成功"),
+                None,
+            );
             let resp = LoginResp {
                 token,
                 must_change_password: user.must_change_password,
@@ -234,9 +274,18 @@ pub async fn login(State(state): State<Arc<AppState>>, ConnectInfo(addr): Connec
             ok_json(&resp)
         }
         None => {
-            state.db.record_login_attempt(&req.username, Some(&client_ip), false);
+            state
+                .db
+                .record_login_attempt(&req.username, Some(&client_ip), false);
             // 审计日志：登录失败
-            state.db.audit_log(None, &req.username, "login_failed", None, Some("用户名或密码错误"), None);
+            state.db.audit_log(
+                None,
+                &req.username,
+                "login_failed",
+                None,
+                Some("用户名或密码错误"),
+                None,
+            );
             unauthorized_json("用户名或密码错误")
         }
     }
@@ -268,10 +317,20 @@ pub async fn change_password(
     }
     match state.db.change_password(user.id, &req.new_password) {
         Ok(()) => {
-            state.db.audit_log(Some(user.id), &user.username, "change_password", None, Some("修改自己的密码"), None);
+            state.db.audit_log(
+                Some(user.id),
+                &user.username,
+                "change_password",
+                None,
+                Some("修改自己的密码"),
+                None,
+            );
             json_resp(StatusCode::OK, r#"{"ok":true}"#)
         }
-        Err(e) => json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
+        Err(e) => json_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{e}"}}"#),
+        ),
     }
 }
 
@@ -281,7 +340,12 @@ pub async fn change_password(
 pub async fn list_users(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     require_admin!(user);
-    let users: Vec<UserResp> = state.db.list_users().into_iter().map(UserResp::from).collect();
+    let users: Vec<UserResp> = state
+        .db
+        .list_users()
+        .into_iter()
+        .map(UserResp::from)
+        .collect();
     ok_json(&users)
 }
 
@@ -323,9 +387,23 @@ pub async fn create_user(
         }
     };
 
-    match state.db.create_user(&req.username, &password, &req.role, shared_dir.as_deref(), &req.permissions, req.quota_mb) {
+    match state.db.create_user(
+        &req.username,
+        &password,
+        &req.role,
+        shared_dir.as_deref(),
+        &req.permissions,
+        req.quota_mb,
+    ) {
         Ok(id) => {
-            state.db.audit_log(Some(user.id), &user.username, "create_user", None, Some(&format!("用户: {}", req.username)), None);
+            state.db.audit_log(
+                Some(user.id),
+                &user.username,
+                "create_user",
+                None,
+                Some(&format!("用户: {}", req.username)),
+                None,
+            );
             json_resp(StatusCode::CREATED, &format!(r#"{{"ok":true,"id":{id}}}"#))
         }
         Err(e) => bad_request_json(&e),
@@ -342,7 +420,14 @@ pub async fn delete_user(
     require_admin!(user);
     match state.db.delete_user(user_id) {
         Ok(()) => {
-            state.db.audit_log(Some(user.id), &user.username, "delete_user", None, Some(&format!("用户ID: {}", user_id)), None);
+            state.db.audit_log(
+                Some(user.id),
+                &user.username,
+                "delete_user",
+                None,
+                Some(&format!("用户ID: {}", user_id)),
+                None,
+            );
             json_resp(StatusCode::OK, r#"{"ok":true}"#)
         }
         Err(e) => bad_request_json(&e),
@@ -358,9 +443,22 @@ pub async fn update_user(
 ) -> Response {
     let user = require_auth!(&state, &headers);
     require_admin!(user);
-    match state.db.update_user(user_id, req.role.as_deref(), req.shared_dir.as_ref().map(|d| d.as_deref()), req.permissions.as_deref(), req.quota_mb) {
+    match state.db.update_user(
+        user_id,
+        req.role.as_deref(),
+        req.shared_dir.as_ref().map(|d| d.as_deref()),
+        req.permissions.as_deref(),
+        req.quota_mb,
+    ) {
         Ok(()) => {
-            state.db.audit_log(Some(user.id), &user.username, "update_user", None, Some(&format!("用户ID: {}", user_id)), None);
+            state.db.audit_log(
+                Some(user.id),
+                &user.username,
+                "update_user",
+                None,
+                Some(&format!("用户ID: {}", user_id)),
+                None,
+            );
             json_resp(StatusCode::OK, r#"{"ok":true}"#)
         }
         Err(e) => bad_request_json(&e),
@@ -381,17 +479,30 @@ pub async fn reset_user_password(
     }
     match state.db.change_password(user_id, &req.new_password) {
         Ok(()) => {
-            state.db.audit_log(Some(user.id), &user.username, "reset_password", None, Some(&format!("用户ID: {}", user_id)), None);
+            state.db.audit_log(
+                Some(user.id),
+                &user.username,
+                "reset_password",
+                None,
+                Some(&format!("用户ID: {}", user_id)),
+                None,
+            );
             json_resp(StatusCode::OK, r#"{"ok":true}"#)
         }
-        Err(e) => json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
+        Err(e) => json_resp(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!(r#"{{"error":"{e}"}}"#),
+        ),
     }
 }
 
 // 全局设置（admin）
 
 /// GET /api/admin/settings
-pub async fn get_admin_settings(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn get_admin_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
     let user = require_auth!(&state, &headers);
     require_admin!(user);
     let settings = state.db.get_all_admin_settings();
@@ -422,15 +533,26 @@ pub async fn set_admin_settings(
             if let Ok(mut toml_val) = text.parse::<toml::Value>() {
                 if let Some(obj) = req.as_object() {
                     // 只同步 TOML 中已有的字段
-                    let toml_keys = ["shared_dir", "lsp_port", "web_port", "device_name", "auto_browser", "pin"];
+                    let toml_keys = [
+                        "shared_dir",
+                        "lsp_port",
+                        "web_port",
+                        "device_name",
+                        "auto_browser",
+                        "pin",
+                    ];
                     for key in &toml_keys {
                         if let Some(v) = obj.get(*key) {
                             let toml_v = match v {
                                 serde_json::Value::String(s) => toml::Value::String(s.clone()),
                                 serde_json::Value::Number(n) => {
-                                    if let Some(i) = n.as_i64() { toml::Value::Integer(i) }
-                                    else if let Some(f) = n.as_f64() { toml::Value::Float(f) }
-                                    else { continue; }
+                                    if let Some(i) = n.as_i64() {
+                                        toml::Value::Integer(i)
+                                    } else if let Some(f) = n.as_f64() {
+                                        toml::Value::Float(f)
+                                    } else {
+                                        continue;
+                                    }
                                 }
                                 serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
                                 _ => continue,
@@ -446,7 +568,14 @@ pub async fn set_admin_settings(
         }
     }
 
-    state.db.audit_log(Some(user.id), &user.username, "update_settings", None, Some("修改系统设置"), None);
+    state.db.audit_log(
+        Some(user.id),
+        &user.username,
+        "update_settings",
+        None,
+        Some("修改系统设置"),
+        None,
+    );
     json_resp(StatusCode::OK, r#"{"ok":true}"#)
 }
 
@@ -554,14 +683,16 @@ pub async fn download_zip(
     }
 
     // 目录名作为 zip 文件名
-    let dir_name = dir.file_name()
+    let dir_name = dir
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "download".to_string());
     let zip_name = format!("{}.zip", dir_name);
 
     // 在临时目录创建 zip
     let temp_dir = std::env::temp_dir();
-    let zip_path = temp_dir.join(format!("lanshare_{}_{}.zip",
+    let zip_path = temp_dir.join(format!(
+        "lanshare_{}_{}.zip",
         uuid::Uuid::new_v4().simple(),
         std::process::id(),
     ));
@@ -569,9 +700,7 @@ pub async fn download_zip(
     // 同步创建 zip（walkdir + zip 都是同步 API，放 spawn_blocking 里）
     let dir_clone = dir.clone();
     let zip_path_clone = zip_path.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        create_zip(&dir_clone, &zip_path_clone)
-    }).await;
+    let result = tokio::task::spawn_blocking(move || create_zip(&dir_clone, &zip_path_clone)).await;
 
     match result {
         Ok(Ok(())) => {
@@ -580,8 +709,10 @@ pub async fn download_zip(
                 Ok(f) => f,
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&zip_path).await;
-                    return json_resp(StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!(r#"{{"error":"打开 zip 失败: {e}"}}"#));
+                    return json_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!(r#"{{"error":"打开 zip 失败: {e}"}}"#),
+                    );
                 }
             };
             let meta = file.metadata().await.ok();
@@ -599,27 +730,35 @@ pub async fn download_zip(
             });
 
             let encoded_name = percent_encoding::utf8_percent_encode(
-                &zip_name, percent_encoding::NON_ALPHANUMERIC
-            ).to_string();
+                &zip_name,
+                percent_encoding::NON_ALPHANUMERIC,
+            )
+            .to_string();
 
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/zip")
                 .header(header::CONTENT_LENGTH, size.to_string())
-                .header(header::CONTENT_DISPOSITION,
-                    format!("attachment; filename*=UTF-8''{}", encoded_name))
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename*=UTF-8''{}", encoded_name),
+                )
                 .body(body)
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(Err(e)) => {
             let _ = tokio::fs::remove_file(&zip_path).await;
-            json_resp(StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"error":"打包失败: {e}"}}"#))
+            json_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(r#"{{"error":"打包失败: {e}"}}"#),
+            )
         }
         Err(e) => {
             let _ = tokio::fs::remove_file(&zip_path).await;
-            json_resp(StatusCode::INTERNAL_SERVER_ERROR,
-                &format!(r#"{{"error":"打包任务异常: {e}"}}"#))
+            json_resp(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!(r#"{{"error":"打包任务异常: {e}"}}"#),
+            )
         }
     }
 }
@@ -629,15 +768,16 @@ fn create_zip(dir: &Path, zip_path: &Path) -> Result<(), String> {
     use zip::write::SimpleFileOptions;
     use zip::CompressionMethod;
 
-    let file = std::fs::File::create(zip_path)
-        .map_err(|e| format!("创建 zip 文件失败: {e}"))?;
+    let file = std::fs::File::create(zip_path).map_err(|e| format!("创建 zip 文件失败: {e}"))?;
     let mut zip = zip::ZipWriter::new(file);
-    let options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
     let base = dir.parent().unwrap_or(dir);
 
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let path = entry.path();
         // zip 内路径：相对 base（包含顶层目录名）
         let rel = path.strip_prefix(base).unwrap_or(path);
@@ -649,10 +789,9 @@ fn create_zip(dir: &Path, zip_path: &Path) -> Result<(), String> {
         } else {
             zip.start_file(rel_str, options)
                 .map_err(|e| format!("写入 zip 条目失败: {e}"))?;
-            let mut f = std::fs::File::open(path)
-                .map_err(|e| format!("打开文件失败 {:?}: {e}", path))?;
-            std::io::copy(&mut f, &mut zip)
-                .map_err(|e| format!("写入文件数据失败: {e}"))?;
+            let mut f =
+                std::fs::File::open(path).map_err(|e| format!("打开文件失败 {:?}: {e}", path))?;
+            std::io::copy(&mut f, &mut zip).map_err(|e| format!("写入文件数据失败: {e}"))?;
         }
     }
 
@@ -691,32 +830,49 @@ pub async fn create_share(
         return json_resp(StatusCode::FORBIDDEN, r#"{"error":"路径非法"}"#);
     }
 
-    let token = state.db.create_share(user.id, &req.path, req.expires_hours, req.max_downloads);
+    let token = state
+        .db
+        .create_share(user.id, &req.path, req.expires_hours, req.max_downloads);
     let url = format!("/s/{}", token);
 
-    state.db.audit_log(Some(user.id), &user.username, "create_share", Some(&req.path), Some(&format!("token: {}", token)), None);
+    state.db.audit_log(
+        Some(user.id),
+        &user.username,
+        "create_share",
+        Some(&req.path),
+        Some(&format!("token: {}", token)),
+        None,
+    );
 
-    json_resp(StatusCode::OK, &format!(
-        r#"{{"ok":true,"token":"{}","url":"{}"}}"#,
-        token, url
-    ))
+    json_resp(
+        StatusCode::OK,
+        &format!(r#"{{"ok":true,"token":"{}","url":"{}"}}"#, token, url),
+    )
 }
 
 /// GET /api/shares — 列出当前用户的分享链接
-pub async fn list_shares(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn list_shares(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let user = require_auth!(&state, &headers);
     let shares = state.db.list_shares(user.id);
 
-    let items: Vec<String> = shares.iter().map(|(token, path, expires, count)| {
-        let exp = expires.as_ref().map(|e| format!(r#","expires_at":"{}""#, e)).unwrap_or_default();
-        format!(r#"{{"token":"{}","path":"{}","url":"/s/{}"{},"download_count":{}}}"#,
-            token, path, token, exp, count)
-    }).collect();
+    let items: Vec<String> = shares
+        .iter()
+        .map(|(token, path, expires, count)| {
+            let exp = expires
+                .as_ref()
+                .map(|e| format!(r#","expires_at":"{}""#, e))
+                .unwrap_or_default();
+            format!(
+                r#"{{"token":"{}","path":"{}","url":"/s/{}"{},"download_count":{}}}"#,
+                token, path, token, exp, count
+            )
+        })
+        .collect();
 
-    json_resp(StatusCode::OK, &format!(r#"{{"shares":[{}]}}"#, items.join(",")))
+    json_resp(
+        StatusCode::OK,
+        &format!(r#"{{"shares":[{}]}}"#, items.join(",")),
+    )
 }
 
 /// DELETE /api/share/:token — 删除分享链接
@@ -770,23 +926,35 @@ pub async fn access_share(
     state.db.increment_share_download(&token);
 
     // 审计日志：分享链接访问
-    state.db.audit_log(Some(user_id), &user.username, "share_access", Some(&path), Some(&format!("token: {}", token)), None);
+    state.db.audit_log(
+        Some(user_id),
+        &user.username,
+        "share_access",
+        Some(&path),
+        Some(&format!("token: {}", token)),
+        None,
+    );
 
     // 如果是目录，打包 zip 下载
     if full_path.is_dir() {
-        let dir_name = full_path.file_name()
+        let dir_name = full_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "share".to_string());
         let zip_name = format!("{}.zip", dir_name);
 
         let temp_dir = std::env::temp_dir();
-        let zip_path = temp_dir.join(format!("lanshare_share_{}.zip", uuid::Uuid::new_v4().simple()));
+        let zip_path = temp_dir.join(format!(
+            "lanshare_share_{}.zip",
+            uuid::Uuid::new_v4().simple()
+        ));
 
         let result = tokio::task::spawn_blocking({
             let full_path = full_path.clone();
             let zip_path = zip_path.clone();
             move || create_zip(&full_path, &zip_path)
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(Ok(())) => {
@@ -805,14 +973,19 @@ pub async fn access_share(
                 });
 
                 let encoded_name = percent_encoding::utf8_percent_encode(
-                    &zip_name, percent_encoding::NON_ALPHANUMERIC
-                ).to_string();
+                    &zip_name,
+                    percent_encoding::NON_ALPHANUMERIC,
+                )
+                .to_string();
 
                 Response::builder()
                     .status(StatusCode::OK)
                     .header(header::CONTENT_TYPE, "application/zip")
                     .header(header::CONTENT_LENGTH, size.to_string())
-                    .header(header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}", encoded_name))
+                    .header(
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename*=UTF-8''{}", encoded_name),
+                    )
                     .body(body)
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
             }
@@ -825,22 +998,26 @@ pub async fn access_share(
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
         let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-        let file_name = full_path.file_name()
+        let file_name = full_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "download".to_string());
 
         let stream = tokio_util::io::ReaderStream::new(file);
         let body = Body::from_stream(stream);
 
-        let encoded_name = percent_encoding::utf8_percent_encode(
-            &file_name, percent_encoding::NON_ALPHANUMERIC
-        ).to_string();
+        let encoded_name =
+            percent_encoding::utf8_percent_encode(&file_name, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
 
         Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/octet-stream")
             .header(header::CONTENT_LENGTH, size.to_string())
-            .header(header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}", encoded_name))
+            .header(
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename*=UTF-8''{}", encoded_name),
+            )
             .body(body)
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
     } else {
@@ -849,10 +1026,7 @@ pub async fn access_share(
 }
 
 /// GET /api/discover — 发现局域网内的其他 LanShare 服务器
-pub async fn discover_servers(
-    State(_state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn discover_servers(State(_state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let _user = require_auth!(&_state, &headers);
 
     let servers = crate::discovery::discover_servers(2000).await;
@@ -861,7 +1035,10 @@ pub async fn discover_servers(
             s.name, s.ip, s.web_port, s.lsp_port, s.version, s.url)
     }).collect();
 
-    json_resp(StatusCode::OK, &format!(r#"{{"servers":[{}]}}"#, items.join(",")))
+    json_resp(
+        StatusCode::OK,
+        &format!(r#"{{"servers":[{}]}}"#, items.join(",")),
+    )
 }
 
 /// GET /api/admin/audit-logs — 获取审计日志（admin 专用）
@@ -876,14 +1053,37 @@ pub async fn get_audit_logs(
     let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100);
     let logs = state.db.get_audit_logs(limit);
 
-    let items: Vec<String> = logs.iter().map(|l| {
-        let path = l.path.as_ref().map(|p| format!(r#","path":"{}""#, p.replace('"', "\\\""))).unwrap_or_default();
-        let detail = l.detail.as_ref().map(|d| format!(r#","detail":"{}""#, d.replace('"', "\\\""))).unwrap_or_default();
-        let ip = l.ip.as_ref().map(|i| format!(r#","ip":"{}""#, i)).unwrap_or_default();
-        let username = l.username.as_ref().map(|u| format!(r#""{}""#, u.replace('"', "\\\""))).unwrap_or_else(|| "null".to_string());
-        format!(r#"{{"id":{},"user_id":{:?},"username":{},"action":"{}"{}{}{},"created_at":"{}"}}"#,
-            l.id, l.user_id, username, l.action, path, detail, ip, l.created_at)
-    }).collect();
+    let items: Vec<String> = logs
+        .iter()
+        .map(|l| {
+            let path = l
+                .path
+                .as_ref()
+                .map(|p| format!(r#","path":"{}""#, p.replace('"', "\\\"")))
+                .unwrap_or_default();
+            let detail = l
+                .detail
+                .as_ref()
+                .map(|d| format!(r#","detail":"{}""#, d.replace('"', "\\\"")))
+                .unwrap_or_default();
+            let ip =
+                l.ip.as_ref()
+                    .map(|i| format!(r#","ip":"{}""#, i))
+                    .unwrap_or_default();
+            let username = l
+                .username
+                .as_ref()
+                .map(|u| format!(r#""{}""#, u.replace('"', "\\\"")))
+                .unwrap_or_else(|| "null".to_string());
+            format!(
+                r#"{{"id":{},"user_id":{:?},"username":{},"action":"{}"{}{}{},"created_at":"{}"}}"#,
+                l.id, l.user_id, username, l.action, path, detail, ip, l.created_at
+            )
+        })
+        .collect();
 
-    json_resp(StatusCode::OK, &format!(r#"{{"logs":[{}]}}"#, items.join(",")))
+    json_resp(
+        StatusCode::OK,
+        &format!(r#"{{"logs":[{}]}}"#, items.join(",")),
+    )
 }

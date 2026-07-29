@@ -31,7 +31,7 @@
 //! - 客户端：后台 task recv_from → 过滤 peer → channel
 //! - 服务端：主循环 recv_from → 按 src_addr 分发 → 各 channel
 
-use crate::compression::{Compressor, CompressionAlgo, CompressionConfig};
+use crate::compression::{CompressionAlgo, CompressionConfig, Compressor};
 use crate::congestion::CongestionManager;
 use crate::crypto::{aead, KeyPair, SessionKeys};
 use crate::error::{LspError, Result};
@@ -55,10 +55,15 @@ const UDP_SOCKET_BUF_SIZE: usize = 512 * 1024;
 
 /// 创建带大缓冲区的 UDP socket（socket2 → tokio）
 pub async fn bind_udp_socket(addr: &str) -> Result<UdpSocket> {
-    let sock_addr: SocketAddr = addr.parse()
+    let sock_addr: SocketAddr = addr
+        .parse()
         .map_err(|e| LspError::Protocol(format!("Invalid address: {}", e)))?;
     let sock = socket2::Socket::new(
-        if sock_addr.is_ipv6() { socket2::Domain::IPV6 } else { socket2::Domain::IPV4 },
+        if sock_addr.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        },
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
     )?;
@@ -181,9 +186,7 @@ impl UdpConnection {
             key_pair: KeyPair::generate(),
             compressor: Compressor::new(CompressionConfig::default()),
             retransmit_mgr: Arc::new(Mutex::new(RetransmissionManager::new())),
-            flow_ctrl_mgr: Arc::new(Mutex::new(FlowControlManager::new(
-                DEFAULT_INITIAL_WINDOW,
-            ))),
+            flow_ctrl_mgr: Arc::new(Mutex::new(FlowControlManager::new(DEFAULT_INITIAL_WINDOW))),
             congestion_mgr: Arc::new(Mutex::new(CongestionManager::new(
                 DEFAULT_CHUNK_SIZE as u32,
             ))),
@@ -211,9 +214,7 @@ impl UdpConnection {
             key_pair: KeyPair::generate(),
             compressor: Compressor::new(CompressionConfig::default()),
             retransmit_mgr: Arc::new(Mutex::new(RetransmissionManager::new())),
-            flow_ctrl_mgr: Arc::new(Mutex::new(FlowControlManager::new(
-                DEFAULT_INITIAL_WINDOW,
-            ))),
+            flow_ctrl_mgr: Arc::new(Mutex::new(FlowControlManager::new(DEFAULT_INITIAL_WINDOW))),
             congestion_mgr: Arc::new(Mutex::new(CongestionManager::new(
                 DEFAULT_CHUNK_SIZE as u32,
             ))),
@@ -232,10 +233,8 @@ impl UdpConnection {
             let compressed = self.compressor.compress(&frame.payload, None);
             if compressed.compressed {
                 frame.payload = Bytes::from(compressed.data);
-                frame = frame.with_compression(
-                    compressed.algo as u8,
-                    compressed.original_size as u32,
-                );
+                frame =
+                    frame.with_compression(compressed.algo as u8, compressed.original_size as u32);
             }
         }
 
@@ -279,10 +278,8 @@ impl UdpConnection {
             let compressed = self.compressor.compress(&frame.payload, None);
             if compressed.compressed {
                 frame.payload = Bytes::from(compressed.data);
-                frame = frame.with_compression(
-                    compressed.algo as u8,
-                    compressed.original_size as u32,
-                );
+                frame =
+                    frame.with_compression(compressed.algo as u8, compressed.original_size as u32);
             }
         }
 
@@ -330,9 +327,7 @@ impl UdpConnection {
     pub async fn recv_frame(&self) -> Result<Frame> {
         let data = {
             let mut rx = self.recv_rx.lock().await;
-            rx.recv()
-                .await
-                .ok_or(LspError::ConnectionClosed)?
+            rx.recv().await.ok_or(LspError::ConnectionClosed)?
         };
 
         let mut frame = decode_frame(&data)?;
@@ -348,9 +343,8 @@ impl UdpConnection {
                     } else {
                         &keys.client_write_key
                     };
-                    let plaintext =
-                        aead::decrypt(read_key, &nonce, &aad, &frame.payload, &tag)
-                            .map_err(|e| LspError::Decryption(e.to_string()))?;
+                    let plaintext = aead::decrypt(read_key, &nonce, &aad, &frame.payload, &tag)
+                        .map_err(|e| LspError::Decryption(e.to_string()))?;
                     frame.payload = Bytes::from(plaintext);
                 }
             }
@@ -358,9 +352,7 @@ impl UdpConnection {
 
         // 解压
         if frame.flags.has(Flags::COMPRESSED) {
-            if let (Some(algo), Some(orig_size)) =
-                (frame.compression_algo, frame.original_size)
-            {
+            if let (Some(algo), Some(orig_size)) = (frame.compression_algo, frame.original_size) {
                 let algo = CompressionAlgo::from_u8(algo)
                     .ok_or_else(|| LspError::Decompression("Unknown algo".into()))?;
                 let decompressed = self
@@ -400,7 +392,10 @@ impl UdpConnection {
                     stream_id: sid,
                     seq_num,
                 } => {
-                    warn!("Frame dropped: {} on stream {} (max retransmits)", seq_num, sid);
+                    warn!(
+                        "Frame dropped: {} on stream {} (max retransmits)",
+                        seq_num, sid
+                    );
                 }
             }
         }
@@ -443,10 +438,7 @@ impl UdpConnection {
                     let mut mgr = self.congestion_mgr.lock().await;
                     mgr.on_timeout(stream_id);
                 }
-                RetransmitEvent::Dropped {
-                    stream_id,
-                    seq_num,
-                } => {
+                RetransmitEvent::Dropped { stream_id, seq_num } => {
                     warn!(
                         "Frame dropped after max retransmits: {} on stream {}",
                         seq_num, stream_id

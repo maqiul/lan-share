@@ -1,9 +1,9 @@
 use clap::{Parser, Subcommand};
-use lsp_protocol::{LspClient, LspServer, ServerConfig, AccountVerifier};
+use lsp_protocol::{AccountVerifier, LspClient, LspServer, ServerConfig};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{info, error};
+use tracing::{error, info};
 
 mod api;
 mod db;
@@ -37,11 +37,21 @@ struct Config {
     auto_browser: bool,
 }
 
-fn default_shared_dir() -> String { "./shared".to_string() }
-fn default_lsp_port() -> u16 { 9820 }
-fn default_web_port() -> u16 { 8080 }
-fn default_pin() -> String { "123456".to_string() }
-fn default_true() -> bool { true }
+fn default_shared_dir() -> String {
+    "./shared".to_string()
+}
+fn default_lsp_port() -> u16 {
+    9820
+}
+fn default_web_port() -> u16 {
+    8080
+}
+fn default_pin() -> String {
+    "123456".to_string()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -81,7 +91,10 @@ auto_browser = true
 
 /// 配置文件路径（与 exe 同级）
 fn config_path() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.join("lanshare.toml"))
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.join("lanshare.toml"))
 }
 
 /// 加载配置：文件不存在则生成默认配置；解析失败则用默认值
@@ -93,7 +106,11 @@ fn load_config() -> Config {
         Ok(content) => match toml::from_str(&content) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("  配置文件解析失败（{}），使用默认配置: {}", path.display(), e);
+                eprintln!(
+                    "  配置文件解析失败（{}），使用默认配置: {}",
+                    path.display(),
+                    e
+                );
                 Config::default()
             }
         },
@@ -114,7 +131,10 @@ fn resolve_shared_dir(raw: &str) -> PathBuf {
     let p = PathBuf::from(raw);
     if p.is_absolute() {
         p
-    } else if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+    } else if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+    {
         dir.join(p).components().as_path().to_path_buf()
     } else {
         p
@@ -144,11 +164,17 @@ fn show_fatal_error(msg: &str) {
     eprintln!("\n❌ LanShare 启动失败\n{}\n", msg);
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::*;
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
-        let msg_w: Vec<u16> = OsStr::new(msg).encode_wide().chain(std::iter::once(0)).collect();
-        let title_w: Vec<u16> = OsStr::new("LanShare 启动失败").encode_wide().chain(std::iter::once(0)).collect();
+        use windows_sys::Win32::UI::WindowsAndMessaging::*;
+        let msg_w: Vec<u16> = OsStr::new(msg)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let title_w: Vec<u16> = OsStr::new("LanShare 启动失败")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         unsafe {
             MessageBoxW(0, msg_w.as_ptr(), title_w.as_ptr(), MB_OK | MB_ICONERROR);
         }
@@ -156,7 +182,11 @@ fn show_fatal_error(msg: &str) {
 }
 
 #[derive(Parser)]
-#[command(name = "lan-share", about = "LanShare v3.0 - 基于 LSP3 协议的局域网文件共享", version)]
+#[command(
+    name = "lan-share",
+    about = "LanShare v3.0 - 基于 LSP3 协议的局域网文件共享",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -277,17 +307,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Serve { port, name, dir, pin, web_port, no_browser }) => {
-            run_server(port, name, dir, pin, web_port, !no_browser, false).await?
-        }
-        Some(Commands::List { addr, path, recursive, pin }) => run_list(&addr, &path, recursive, &pin).await?,
-        Some(Commands::Download { addr, file, output, pin }) => run_download(&addr, &file, output, &pin).await?,
-        Some(Commands::Upload { addr, file, remote, pin }) => run_upload(&addr, file, remote, &pin).await?,
-        Some(Commands::Delete { addr, file, recursive, pin }) => run_delete(&addr, &file, recursive, &pin).await?,
+        Some(Commands::Serve {
+            port,
+            name,
+            dir,
+            pin,
+            web_port,
+            no_browser,
+        }) => run_server(port, name, dir, pin, web_port, !no_browser, false).await?,
+        Some(Commands::List {
+            addr,
+            path,
+            recursive,
+            pin,
+        }) => run_list(&addr, &path, recursive, &pin).await?,
+        Some(Commands::Download {
+            addr,
+            file,
+            output,
+            pin,
+        }) => run_download(&addr, &file, output, &pin).await?,
+        Some(Commands::Upload {
+            addr,
+            file,
+            remote,
+            pin,
+        }) => run_upload(&addr, file, remote, &pin).await?,
+        Some(Commands::Delete {
+            addr,
+            file,
+            recursive,
+            pin,
+        }) => run_delete(&addr, &file, recursive, &pin).await?,
         Some(Commands::Mkdir { addr, path, pin }) => run_mkdir(&addr, &path, &pin).await?,
-        Some(Commands::Rename { addr, old, new, pin }) => run_rename(&addr, &old, &new, &pin).await?,
+        Some(Commands::Rename {
+            addr,
+            old,
+            new,
+            pin,
+        }) => run_rename(&addr, &old, &new, &pin).await?,
         Some(Commands::Stat { addr, file, pin }) => run_stat(&addr, &file, &pin).await?,
-        Some(Commands::DeltaUpload { addr, file, remote, pin }) => run_delta_upload(&addr, file, remote, &pin).await?,
+        Some(Commands::DeltaUpload {
+            addr,
+            file,
+            remote,
+            pin,
+        }) => run_delta_upload(&addr, file, remote, &pin).await?,
         Some(Commands::Discover { timeout }) => run_discover(timeout).await?,
         // 无参数：图形模式（双击启动）——默认配置 + 自动开浏览器 + 托盘常驻
         None => run_gui().await?,
@@ -305,7 +370,15 @@ async fn connect_and_auth(addr: &str, pin: &str) -> Result<LspClient, Box<dyn st
     Ok(client)
 }
 
-async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, web_port: u16, auto_browser: bool, with_tray: bool) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_server(
+    port: u16,
+    name: Option<String>,
+    dir: PathBuf,
+    pin: String,
+    web_port: u16,
+    auto_browser: bool,
+    with_tray: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let device_name = name.unwrap_or_else(|| {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -334,12 +407,24 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
     let account_verifier: AccountVerifier = Arc::new(move |username, password| {
         db_for_lsp.verify_login(username, password).map(|user| {
             let mut perms = Vec::new();
-            if user.can_read() { perms.push("read"); }
-            if user.can_write() { perms.push("write"); }
-            if user.can_delete() { perms.push("delete"); }
-            if user.can_rename() { perms.push("rename"); }
-            if user.can_mkdir() { perms.push("mkdir"); }
-            if user.can_share() { perms.push("share"); }
+            if user.can_read() {
+                perms.push("read");
+            }
+            if user.can_write() {
+                perms.push("write");
+            }
+            if user.can_delete() {
+                perms.push("delete");
+            }
+            if user.can_rename() {
+                perms.push("rename");
+            }
+            if user.can_mkdir() {
+                perms.push("mkdir");
+            }
+            if user.can_share() {
+                perms.push("share");
+            }
             perms.join(",")
         })
     });
@@ -356,7 +441,8 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
     info!("LSP protocol: {}:{}", local_ip, port);
     if web_port > 0 {
         info!("Web UI: http://{}:{}", local_ip, web_port);
-        let simple_mode = db.get_admin_setting("simple_mode")
+        let simple_mode = db
+            .get_admin_setting("simple_mode")
             .map(|v| v != "false")
             .unwrap_or(true);
         if simple_mode {
@@ -398,13 +484,16 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
         let web_handle = tokio::spawn(async move {
             if let Err(e) = server::start_web_server(
                 web_port, web_dir, web_pin, web_name, web_ip, port, web_cfg, web_db,
-            ).await {
+            )
+            .await
+            {
                 error!("Web server error: {}", e);
             }
         });
 
         // 局域网发现服务（UDP 广播）
-        let disc_simple = db.get_admin_setting("simple_mode")
+        let disc_simple = db
+            .get_admin_setting("simple_mode")
             .map(|v| v != "false")
             .unwrap_or(true);
         let discovery_info = Arc::new(discovery::ServerInfo {
@@ -462,7 +551,11 @@ async fn run_server(port: u16, name: Option<String>, dir: PathBuf, pin: String, 
 async fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = load_config();
     let shared_dir = resolve_shared_dir(&cfg.shared_dir);
-    let name = if cfg.device_name.is_empty() { None } else { Some(cfg.device_name.clone()) };
+    let name = if cfg.device_name.is_empty() {
+        None
+    } else {
+        Some(cfg.device_name.clone())
+    };
 
     println!("╔════════════════════════════════════════════╗");
     println!("║     LanShare - 局域网文件共享              ║");
@@ -484,17 +577,34 @@ async fn run_gui() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(windows))]
     println!("        Ctrl+C 停止服务");
     println!();
-    run_server(cfg.lsp_port, name, shared_dir, cfg.pin.clone(), cfg.web_port, cfg.auto_browser, true).await
+    run_server(
+        cfg.lsp_port,
+        name,
+        shared_dir,
+        cfg.pin.clone(),
+        cfg.web_port,
+        cfg.auto_browser,
+        true,
+    )
+    .await
 }
 
 /// 打开默认浏览器（各平台原生实现，零依赖）
 fn open_browser(url: &str) {
     #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("cmd").args(["/c", "start", "", url]).spawn(); }
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .spawn();
+    }
     #[cfg(target_os = "macos")]
-    { let _ = std::process::Command::new("open").arg(url).spawn(); }
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
     #[cfg(all(unix, not(target_os = "macos")))]
-    { let _ = std::process::Command::new("xdg-open").arg(url).spawn(); }
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }
 
 /// 创建系统托盘图标（含「打开界面」「退出」菜单，跨平台）
@@ -513,8 +623,9 @@ fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Erro
                 res_data.len() as u32,
                 1,          // fIcon = TRUE
                 0x00030000, // 图标版本
-                16, 16,     // 期望尺寸
-                0,          // LR_DEFAULTCOLOR
+                16,
+                16, // 期望尺寸
+                0,  // LR_DEFAULTCOLOR
             )
         };
         if hicon == 0 {
@@ -527,14 +638,22 @@ fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Erro
     let icon = {
         // macOS: NSImage::initWithData 需要 PNG 编码数据
         let png_data = generate_icon_png();
-        IconSource::Data { height: 16, width: 16, data: png_data }
+        IconSource::Data {
+            height: 16,
+            width: 16,
+            data: png_data,
+        }
     };
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let icon = {
         // Linux ksni: D-Bus IconPixmap 需要 ARGB32 大端原始像素
         let argb_data = generate_icon_argb32();
-        IconSource::Data { height: 16, width: 16, data: argb_data }
+        IconSource::Data {
+            height: 16,
+            width: 16,
+            data: argb_data,
+        }
     };
 
     let mut tray = TrayItem::new("LanShare", icon)?;
@@ -560,8 +679,10 @@ fn generate_icon_pixels() -> Vec<[u8; 4]> {
     for y in 0..W {
         for x in 0..W {
             let idx = y * W + x;
-            if (x == 0 && y == 0) || (x == W - 1 && y == 0)
-                || (x == 0 && y == W - 1) || (x == W - 1 && y == W - 1)
+            if (x == 0 && y == 0)
+                || (x == W - 1 && y == 0)
+                || (x == 0 && y == W - 1)
+                || (x == W - 1 && y == W - 1)
             {
                 px[idx] = transparent;
             } else if is_arrow_pixel(x, y) {
@@ -647,7 +768,12 @@ fn generate_icon_argb32() -> Vec<u8> {
     data
 }
 
-async fn run_list(addr: &str, path: &str, recursive: bool, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_list(
+    addr: &str,
+    path: &str,
+    recursive: bool,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = connect_and_auth(addr, pin).await?;
     let files = client.list_files(path, recursive).await?;
 
@@ -655,7 +781,11 @@ async fn run_list(addr: &str, path: &str, recursive: bool, pin: &str) -> Result<
     println!("{:-<70}", "");
     for f in &files {
         let icon = if f.is_dir { "📁" } else { "📄" };
-        let size = if f.is_dir { "<DIR>".to_string() } else { format_size(f.size) };
+        let size = if f.is_dir {
+            "<DIR>".to_string()
+        } else {
+            format_size(f.size)
+        };
         let ro = if f.readonly { " [RO]" } else { "" };
         let time = chrono::DateTime::from_timestamp(f.modified, 0)
             .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
@@ -667,7 +797,12 @@ async fn run_list(addr: &str, path: &str, recursive: bool, pin: &str) -> Result<
     Ok(())
 }
 
-async fn run_download(addr: &str, file: &str, output: PathBuf, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_download(
+    addr: &str,
+    file: &str,
+    output: PathBuf,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = connect_and_auth(addr, pin).await?;
     info!("Downloading {} -> {}", file, output.display());
     let size = client.download_file(file, output, 0).await?;
@@ -675,10 +810,17 @@ async fn run_download(addr: &str, file: &str, output: PathBuf, pin: &str) -> Res
     Ok(())
 }
 
-async fn run_upload(addr: &str, file: PathBuf, remote: Option<String>, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_upload(
+    addr: &str,
+    file: PathBuf,
+    remote: Option<String>,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = connect_and_auth(addr, pin).await?;
     let remote_name = remote.unwrap_or_else(|| {
-        file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".to_string())
+        file.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string())
     });
     info!("Uploading {} -> {}", file.display(), remote_name);
     let size = client.upload_file(file, &remote_name).await?;
@@ -686,7 +828,12 @@ async fn run_upload(addr: &str, file: PathBuf, remote: Option<String>, pin: &str
     Ok(())
 }
 
-async fn run_delete(addr: &str, file: &str, recursive: bool, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_delete(
+    addr: &str,
+    file: &str,
+    recursive: bool,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = connect_and_auth(addr, pin).await?;
     client.delete_file(file, recursive).await?;
     println!("✅ Deleted: {}", file);
@@ -700,7 +847,12 @@ async fn run_mkdir(addr: &str, path: &str, pin: &str) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-async fn run_rename(addr: &str, old: &str, new: &str, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_rename(
+    addr: &str,
+    old: &str,
+    new: &str,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = connect_and_auth(addr, pin).await?;
     client.rename(old, new).await?;
     println!("✅ Renamed: {} -> {}", old, new);
@@ -716,21 +868,34 @@ async fn run_stat(addr: &str, file: &str, pin: &str) -> Result<(), Box<dyn std::
     println!("Name:     {}", entry.name);
     println!("Path:     {}", entry.path);
     println!("Size:     {} ({})", format_size(entry.size), entry.size);
-    println!("Type:     {}", if entry.is_dir { "Directory" } else { "File" });
+    println!(
+        "Type:     {}",
+        if entry.is_dir { "Directory" } else { "File" }
+    );
     println!("Readonly: {}", entry.readonly);
-    println!("Modified: {}", chrono::DateTime::from_timestamp(entry.modified, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_default());
+    println!(
+        "Modified: {}",
+        chrono::DateTime::from_timestamp(entry.modified, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default()
+    );
     if let Some(sha) = &entry.sha256 {
         println!("SHA-256:  {}", sha);
     }
     Ok(())
 }
 
-async fn run_delta_upload(addr: &str, file: PathBuf, remote: Option<String>, pin: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_delta_upload(
+    addr: &str,
+    file: PathBuf,
+    remote: Option<String>,
+    pin: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let client = connect_and_auth(addr, pin).await?;
     let remote_name = remote.unwrap_or_else(|| {
-        file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".to_string())
+        file.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".to_string())
     });
     info!("Delta uploading {} -> {}", file.display(), remote_name);
     let size = client.delta_upload(file, &remote_name).await?;
@@ -763,10 +928,16 @@ async fn run_discover(timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn format_size(bytes: u64) -> String {
-    if bytes == 0 { return "0 B".to_string(); }
+    if bytes == 0 {
+        return "0 B".to_string();
+    }
     let k = 1024;
     let sizes = ["B", "KB", "MB", "GB", "TB"];
     let i = (bytes as f64).log(k as f64) as usize;
     let i = i.min(sizes.len() - 1);
-    format!("{:.1} {}", bytes as f64 / (k as f64).powi(i as i32), sizes[i])
+    format!(
+        "{:.1} {}",
+        bytes as f64 / (k as f64).powi(i as i32),
+        sizes[i]
+    )
 }

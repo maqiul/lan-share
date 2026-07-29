@@ -69,7 +69,11 @@ pub struct RenameReq {
 // ── 认证辅助 ──
 
 /// 认证：优先 Bearer header，其次 query token
-fn auth(state: &AppState, headers: &HeaderMap, query_token: Option<&str>) -> Option<crate::db::User> {
+fn auth(
+    state: &AppState,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
+) -> Option<crate::db::User> {
     if let Some(u) = crate::api::auth_user(state, headers) {
         return Some(u);
     }
@@ -121,15 +125,15 @@ fn mime_type(path: &Path) -> &'static str {
         .to_ascii_lowercase();
     match ext.as_str() {
         // 文本
-        "txt" | "log" | "md" | "csv" | "json" | "xml" | "yml" | "yaml" | "ini" | "conf"
-        | "cfg" | "toml" | "properties" => "text/plain; charset=utf-8",
+        "txt" | "log" | "md" | "csv" | "json" | "xml" | "yml" | "yaml" | "ini" | "conf" | "cfg"
+        | "toml" | "properties" => "text/plain; charset=utf-8",
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
         "ts" => "text/typescript; charset=utf-8",
         // 代码（当文本预览）
-        "rs" | "py" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "go" | "rb" | "php"
-        | "sh" | "bat" | "ps1" | "sql" | "r" | "swift" | "kt" | "scala" | "lua" | "pl" => {
+        "rs" | "py" | "java" | "c" | "h" | "cpp" | "hpp" | "cs" | "go" | "rb" | "php" | "sh"
+        | "bat" | "ps1" | "sql" | "r" | "swift" | "kt" | "scala" | "lua" | "pl" => {
             "text/plain; charset=utf-8"
         }
         // 图片
@@ -200,7 +204,12 @@ pub async fn list_files(
 
     let entries = match tokio::fs::read_dir(&dir).await {
         Ok(rd) => rd,
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("读取目录失败: {e}")),
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("读取目录失败: {e}"),
+            )
+        }
     };
 
     let mut files: Vec<FileEntry> = Vec::new();
@@ -314,7 +323,12 @@ pub async fn preview_file(
 async fn serve_file(path: PathBuf, attachment: bool) -> Response {
     let file = match tokio::fs::File::open(&path).await {
         Ok(f) => f,
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("打开文件失败: {e}")),
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("打开文件失败: {e}"),
+            )
+        }
     };
     let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
 
@@ -415,11 +429,16 @@ pub async fn upload_file(
                 match field.bytes().await {
                     Ok(data) => {
                         if upload_id.is_none() && data.len() as u64 > MAX_SINGLE_UPLOAD {
-                            return err_json(StatusCode::PAYLOAD_TOO_LARGE, "文件过大，请使用分片上传");
+                            return err_json(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "文件过大，请使用分片上传",
+                            );
                         }
                         file_data = Some(data.to_vec());
                     }
-                    Err(e) => return err_json(StatusCode::BAD_REQUEST, &format!("读取上传数据失败: {e}")),
+                    Err(e) => {
+                        return err_json(StatusCode::BAD_REQUEST, &format!("读取上传数据失败: {e}"))
+                    }
                 }
             }
             _ => {}
@@ -455,13 +474,19 @@ pub async fn upload_file(
 
         let tmp_dir = home.join(UPLOAD_TMP_DIR).join(&uid);
         if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("创建临时目录失败: {e}"));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("创建临时目录失败: {e}"),
+            );
         }
 
         // 写入分片文件
         let chunk_path = tmp_dir.join(format!("part_{:06}", idx));
         if let Err(e) = tokio::fs::write(&chunk_path, &data).await {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("写入分片失败: {e}"));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("写入分片失败: {e}"),
+            );
         }
 
         // 记录元信息
@@ -518,7 +543,12 @@ pub async fn upload_file(
         {
             let mut out = match tokio::fs::File::create(&tmp_file).await {
                 Ok(f) => f,
-                Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("创建合并文件失败: {e}")),
+                Err(e) => {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("创建合并文件失败: {e}"),
+                    )
+                }
             };
             use tokio::io::AsyncWriteExt;
             for i in 0..total {
@@ -528,18 +558,27 @@ pub async fn upload_file(
                     Err(_) => return err_json(StatusCode::BAD_REQUEST, "分片读取失败"),
                 };
                 if let Err(e) = out.write_all(&data).await {
-                    return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("合并写入失败: {e}"));
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("合并写入失败: {e}"),
+                    );
                 }
             }
             let _ = out.flush().await;
         }
 
         if let Err(e) = tokio::fs::rename(&tmp_file, &final_path).await {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("移动文件失败: {e}"));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("移动文件失败: {e}"),
+            );
         }
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
 
-        let size = tokio::fs::metadata(&final_path).await.map(|m| m.len()).unwrap_or(0);
+        let size = tokio::fs::metadata(&final_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         ok_json(&serde_json::json!({
             "status": "complete",
             "name": final_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
@@ -560,11 +599,17 @@ pub async fn upload_file(
         let tmp_name = format!(".upload_{}", uuid::Uuid::new_v4().simple());
         let tmp_path = dir.join(&tmp_name);
         if let Err(e) = tokio::fs::write(&tmp_path, &data).await {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("写入文件失败: {e}"));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("写入文件失败: {e}"),
+            );
         }
         if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("移动文件失败: {e}"));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("移动文件失败: {e}"),
+            );
         }
 
         ok_json(&serde_json::json!({
@@ -638,7 +683,10 @@ pub async fn mkdir(
 
     match tokio::fs::create_dir_all(&dir).await {
         Ok(()) => ok_json(&serde_json::json!({"ok": true})),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("创建目录失败: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("创建目录失败: {e}"),
+        ),
     }
 }
 
@@ -693,7 +741,10 @@ pub async fn rename_file(
 
     match tokio::fs::rename(&src, &dst).await {
         Ok(()) => ok_json(&serde_json::json!({"ok": true, "new_name": req.new_name})),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("重命名失败: {e}")),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("重命名失败: {e}"),
+        ),
     }
 }
 
@@ -734,7 +785,10 @@ pub async fn delete_file(
     // 移到回收站
     let trash = home.join(TRASH_DIR);
     if let Err(e) = tokio::fs::create_dir_all(&trash).await {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("创建回收站失败: {e}"));
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("创建回收站失败: {e}"),
+        );
     }
 
     let name = target

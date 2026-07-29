@@ -105,9 +105,8 @@ impl FileSignature {
     /// 计算文件签名
     pub fn compute(data: &[u8], block_size: usize) -> Self {
         let mut blocks = Vec::new();
-        let mut index = 0u32;
 
-        for chunk in data.chunks(block_size) {
+        for (index, chunk) in data.chunks(block_size).enumerate() {
             let weak = RollingChecksum::new(chunk).value();
 
             let mut hasher = Sha256::new();
@@ -117,12 +116,10 @@ impl FileSignature {
             strong.copy_from_slice(&hash[..8]);
 
             blocks.push(BlockChecksum {
-                index,
+                index: index as u32,
                 weak,
                 strong,
             });
-
-            index += 1;
         }
 
         Self {
@@ -513,7 +510,10 @@ mod tests {
 
         // 空目标 → 全是 Literal
         assert_eq!(delta.instructions.len(), 1);
-        assert!(matches!(&delta.instructions[0], DeltaInstruction::Literal { .. }));
+        assert!(matches!(
+            &delta.instructions[0],
+            DeltaInstruction::Literal { .. }
+        ));
     }
 
     #[test]

@@ -94,7 +94,10 @@ pub async fn discover_servers(timeout_ms: u64) -> Vec<DiscoveredServer> {
         return results;
     }
 
-    info!("Sent discovery broadcast, waiting {}ms for responses...", timeout_ms);
+    info!(
+        "Sent discovery broadcast, waiting {}ms for responses...",
+        timeout_ms
+    );
 
     // 收集响应（带超时）
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);

@@ -140,7 +140,11 @@ pub fn run() {
     println!("  ✅ 挂载成功: {}", mountpoint);
     println!("  Ctrl+C 卸载退出");
     println!();
-    discovery::log(&format!("挂载成功: {}（{}）", mountpoint, if writable { "可读写" } else { "只读" }));
+    discovery::log(&format!(
+        "挂载成功: {}（{}）",
+        mountpoint,
+        if writable { "可读写" } else { "只读" }
+    ));
 
     // 后台健康探测 + 网络变化检测
     {

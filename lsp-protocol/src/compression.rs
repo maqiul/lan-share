@@ -113,14 +113,10 @@ impl CompressedData {
 fn incompressible_extensions() -> HashSet<&'static str> {
     [
         // 图片
-        "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "bmp",
-        // 视频
-        "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v",
-        // 音频
-        "mp3", "aac", "ogg", "flac", "wav", "wma", "m4a", "opus",
-        // 压缩包
-        "zip", "rar", "7z", "gz", "bz2", "xz", "zst", "lz4",
-        // 其他
+        "jpg", "jpeg", "png", "gif", "webp", "avif", "heic", "bmp", // 视频
+        "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", // 音频
+        "mp3", "aac", "ogg", "flac", "wav", "wma", "m4a", "opus", // 压缩包
+        "zip", "rar", "7z", "gz", "bz2", "xz", "zst", "lz4", // 其他
         "pdf", "docx", "xlsx", "pptx", "apk", "dmg", "iso",
     ]
     .iter()
@@ -130,11 +126,7 @@ fn incompressible_extensions() -> HashSet<&'static str> {
 
 /// 检查文件是否可能不可压缩
 pub fn is_incompressible(filename: &str) -> bool {
-    let ext = filename
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     incompressible_extensions().contains(ext.as_str())
 }
 
@@ -188,7 +180,12 @@ impl Compressor {
     }
 
     /// 解压数据
-    pub fn decompress(&self, data: &[u8], algo: CompressionAlgo, original_size: usize) -> Result<Vec<u8>, CompressionError> {
+    pub fn decompress(
+        &self,
+        data: &[u8],
+        algo: CompressionAlgo,
+        original_size: usize,
+    ) -> Result<Vec<u8>, CompressionError> {
         match algo {
             CompressionAlgo::None => Ok(data.to_vec()),
             CompressionAlgo::Lz4 => self.decompress_lz4(data, original_size),
@@ -219,7 +216,11 @@ impl Compressor {
     }
 
     /// LZ4 解压
-    fn decompress_lz4(&self, data: &[u8], _original_size: usize) -> Result<Vec<u8>, CompressionError> {
+    fn decompress_lz4(
+        &self,
+        data: &[u8],
+        _original_size: usize,
+    ) -> Result<Vec<u8>, CompressionError> {
         lz4_flex::decompress_size_prepended(data)
             .map_err(|e| CompressionError::DecompressFailed(format!("LZ4: {}", e)))
     }
@@ -255,7 +256,11 @@ impl Compressor {
     }
 
     /// Zstd 解压
-    fn decompress_zstd(&self, data: &[u8], _original_size: usize) -> Result<Vec<u8>, CompressionError> {
+    fn decompress_zstd(
+        &self,
+        data: &[u8],
+        _original_size: usize,
+    ) -> Result<Vec<u8>, CompressionError> {
         zstd::decode_all(std::io::Cursor::new(data))
             .map_err(|e| CompressionError::DecompressFailed(format!("Zstd: {}", e)))
     }

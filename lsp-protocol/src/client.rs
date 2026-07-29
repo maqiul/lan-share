@@ -84,23 +84,18 @@ async fn dispatcher_loop(
     control_tx: mpsc::UnboundedSender<Frame>,
     connected: Arc<AtomicBool>,
 ) {
-    loop {
-        match conn.recv_frame().await {
-            Ok(frame) => {
-                let sid = frame.stream_id;
-                if sid == 0 {
-                    if control_tx.send(frame).is_err() {
-                        break;
-                    }
-                } else {
-                    let tx = pending.lock().await.get(&sid).cloned();
-                    if let Some(tx) = tx {
-                        let _ = tx.send(frame);
-                    }
-                    // 未注册流的帧（如迟到的重传帧）直接丢弃
-                }
+    while let Ok(frame) = conn.recv_frame().await {
+        let sid = frame.stream_id;
+        if sid == 0 {
+            if control_tx.send(frame).is_err() {
+                break;
             }
-            Err(_) => break,
+        } else {
+            let tx = pending.lock().await.get(&sid).cloned();
+            if let Some(tx) = tx {
+                let _ = tx.send(frame);
+            }
+            // 未注册流的帧（如迟到的重传帧）直接丢弃
         }
     }
     // 连接关闭：清空在途请求，drop 所有发送端
@@ -117,11 +112,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl LspClient {
     /// 通过 UDP 连接到服务端
-    pub async fn connect(
-        addr: &str,
-        device_id: String,
-        device_name: String,
-    ) -> Result<Self> {
+    pub async fn connect(addr: &str, device_id: String, device_name: String) -> Result<Self> {
         let conn = UdpConnection::connect_client(addr, true, true).await?;
         let conn = Arc::new(conn);
 
@@ -304,7 +295,7 @@ impl LspClient {
     async fn exchange_keys(&mut self) -> Result<()> {
         // 1. 发送客户端公钥
         let auth_init = AuthInitPayload {
-            client_pubkey: hex::encode(&self.conn.key_pair.public_key),
+            client_pubkey: hex::encode(self.conn.key_pair.public_key),
         };
         let frame = Frame::new(
             FrameType::AuthInit,
@@ -331,9 +322,8 @@ impl LspClient {
         let shared_secret = self.conn.key_pair.compute_shared_secret(&server_pubkey);
 
         // 4. 派生会话密钥
-        let handshake_hash = Sha256::digest(
-            [&self.conn.key_pair.public_key[..], &server_pubkey[..]].concat(),
-        );
+        let handshake_hash =
+            Sha256::digest([&self.conn.key_pair.public_key[..], &server_pubkey[..]].concat());
         let mut hh = [0u8; 32];
         hh.copy_from_slice(&handshake_hash);
 
@@ -363,7 +353,10 @@ impl LspClient {
                 let fail: AuthFailPayload = serde_json::from_slice(&resp.payload)?;
                 Err(LspError::Auth(fail.reason))
             }
-            _ => Err(LspError::Protocol(format!("Unexpected: {:?}", resp.frame_type))),
+            _ => Err(LspError::Protocol(format!(
+                "Unexpected: {:?}",
+                resp.frame_type
+            ))),
         }
     }
 
@@ -439,7 +432,10 @@ impl LspClient {
     /// 列出文件
     pub async fn list_files(&self, path: &str, recursive: bool) -> Result<Vec<FileEntry>> {
         let (stream_id, mut rx) = self
-            .open_stream("file_list", serde_json::json!({ "path": path, "recursive": recursive }))
+            .open_stream(
+                "file_list",
+                serde_json::json!({ "path": path, "recursive": recursive }),
+            )
             .await?;
 
         let payload = FileListPayload {
@@ -550,14 +546,20 @@ impl LspClient {
 
             let resp = Self::recv_on_stream(&mut rx).await?;
             if resp.frame_type == FrameType::ReadData {
-                let (_data_offset, is_last, data) = crate::protocol::decode_read_data(&resp.payload)?;
+                let (_data_offset, is_last, data) =
+                    crate::protocol::decode_read_data(&resp.payload)?;
                 file.write_all(data).await?;
                 total_bytes += data.len() as u64;
 
                 // 发送 ACK
-                let ack = AckPayload { stream_id, seq_num: resp.seq_num };
+                let ack = AckPayload {
+                    stream_id,
+                    seq_num: resp.seq_num,
+                };
                 let ack_frame = Frame::new(
-                    FrameType::Ack, stream_id, 0,
+                    FrameType::Ack,
+                    stream_id,
+                    0,
                     Bytes::from(serde_json::to_vec(&ack)?),
                 );
                 self.send_frame(ack_frame).await?;
@@ -640,14 +642,20 @@ impl LspClient {
 
             let resp = Self::recv_on_stream(&mut rx).await?;
             if resp.frame_type == FrameType::ReadData {
-                let (_data_offset, is_last, data) = crate::protocol::decode_read_data(&resp.payload)?;
+                let (_data_offset, is_last, data) =
+                    crate::protocol::decode_read_data(&resp.payload)?;
                 buf.extend_from_slice(data);
                 cur_offset += data.len() as u64;
 
                 // 发送 ACK
-                let ack = AckPayload { stream_id, seq_num: resp.seq_num };
+                let ack = AckPayload {
+                    stream_id,
+                    seq_num: resp.seq_num,
+                };
                 let ack_frame = Frame::new(
-                    FrameType::Ack, stream_id, 0,
+                    FrameType::Ack,
+                    stream_id,
+                    0,
                     Bytes::from(serde_json::to_vec(&ack)?),
                 );
                 self.send_frame(ack_frame).await?;
@@ -980,9 +988,7 @@ impl LspClient {
                     }
                 }
                 crate::diff_transfer::DeltaInstruction::Literal { data } => {
-                    DeltaInstructionPayload::Literal {
-                        data: data.clone(),
-                    }
+                    DeltaInstructionPayload::Literal { data: data.clone() }
                 }
             })
             .collect();

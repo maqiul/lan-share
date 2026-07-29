@@ -61,11 +61,11 @@ pub enum FrameType {
     WriteRollback = 0x35,
 
     // 可靠传输 (0x40-0x4F)
-    Sack = 0x40,           // 选择性确认
-    WindowUpdate = 0x41,   // 窗口更新（流控）
-    DeltaSync = 0x42,      // 差异同步请求
-    DeltaSyncResp = 0x43,  // 差异同步响应（签名）
-    DeltaData = 0x44,      // 差异数据传输
+    Sack = 0x40,          // 选择性确认
+    WindowUpdate = 0x41,  // 窗口更新（流控）
+    DeltaSync = 0x42,     // 差异同步请求
+    DeltaSyncResp = 0x43, // 差异同步响应（签名）
+    DeltaData = 0x44,     // 差异数据传输
 
     // 通用 (0xF0-0xFF)
     Ack = 0xF0,
@@ -209,7 +209,11 @@ impl Frame {
     }
 
     /// 设置加密信息
-    pub fn with_encryption(mut self, nonce: [u8; AEAD_NONCE_SIZE], tag: [u8; AEAD_TAG_SIZE]) -> Self {
+    pub fn with_encryption(
+        mut self,
+        nonce: [u8; AEAD_NONCE_SIZE],
+        tag: [u8; AEAD_TAG_SIZE],
+    ) -> Self {
         self.flags = self.flags.with(Flags::ENCRYPTED);
         self.nonce = Some(nonce);
         self.tag = Some(tag);
@@ -804,7 +808,10 @@ pub fn encode_write_data(offset: u64, data: &[u8]) -> Bytes {
 
 pub fn decode_write_data(payload: &[u8]) -> io::Result<(u64, &[u8])> {
     if payload.len() < 8 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "WriteData payload too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "WriteData payload too short",
+        ));
     }
     let offset = u64::from_be_bytes(payload[..8].try_into().unwrap());
     Ok((offset, &payload[8..]))
@@ -821,7 +828,10 @@ pub fn encode_read_data(offset: u64, is_last: bool, data: &[u8]) -> Bytes {
 
 pub fn decode_read_data(payload: &[u8]) -> io::Result<(u64, bool, &[u8])> {
     if payload.len() < 9 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "ReadData payload too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ReadData payload too short",
+        ));
     }
     let offset = u64::from_be_bytes(payload[..8].try_into().unwrap());
     let is_last = payload[8] != 0;
@@ -864,41 +874,80 @@ pub fn encode_delta_data(
     Bytes::from(buf)
 }
 
-pub fn decode_delta_data(payload: &[u8]) -> io::Result<(String, u64, u64, Vec<DeltaInstructionPayload>)> {
+pub fn decode_delta_data(
+    payload: &[u8],
+) -> io::Result<(String, u64, u64, Vec<DeltaInstructionPayload>)> {
     let mut pos = 0;
-    if payload.len() < 2 { return Err(io::Error::new(io::ErrorKind::InvalidData, "DeltaData too short")); }
-    let path_len = u16::from_be_bytes(payload[pos..pos+2].try_into().unwrap()) as usize;
+    if payload.len() < 2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DeltaData too short",
+        ));
+    }
+    let path_len = u16::from_be_bytes(payload[pos..pos + 2].try_into().unwrap()) as usize;
     pos += 2;
-    if payload.len() < pos + path_len + 20 { return Err(io::Error::new(io::ErrorKind::InvalidData, "DeltaData too short")); }
-    let path = String::from_utf8_lossy(&payload[pos..pos+path_len]).to_string();
+    if payload.len() < pos + path_len + 20 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DeltaData too short",
+        ));
+    }
+    let path = String::from_utf8_lossy(&payload[pos..pos + path_len]).to_string();
     pos += path_len;
-    let source_size = u64::from_be_bytes(payload[pos..pos+8].try_into().unwrap());
+    let source_size = u64::from_be_bytes(payload[pos..pos + 8].try_into().unwrap());
     pos += 8;
-    let delta_size = u64::from_be_bytes(payload[pos..pos+8].try_into().unwrap());
+    let delta_size = u64::from_be_bytes(payload[pos..pos + 8].try_into().unwrap());
     pos += 8;
-    let num_inst = u32::from_be_bytes(payload[pos..pos+4].try_into().unwrap()) as usize;
+    let num_inst = u32::from_be_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
     let mut instructions = Vec::with_capacity(num_inst);
     for _ in 0..num_inst {
-        if pos >= payload.len() { return Err(io::Error::new(io::ErrorKind::InvalidData, "DeltaData truncated")); }
-        let inst_type = payload[pos]; pos += 1;
+        if pos >= payload.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DeltaData truncated",
+            ));
+        }
+        let inst_type = payload[pos];
+        pos += 1;
         match inst_type {
             0 => {
-                if pos + 4 > payload.len() { return Err(io::Error::new(io::ErrorKind::InvalidData, "DeltaData truncated")); }
-                let block_index = u32::from_be_bytes(payload[pos..pos+4].try_into().unwrap());
+                if pos + 4 > payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "DeltaData truncated",
+                    ));
+                }
+                let block_index = u32::from_be_bytes(payload[pos..pos + 4].try_into().unwrap());
                 pos += 4;
                 instructions.push(DeltaInstructionPayload::Copy { block_index });
             }
             1 => {
-                if pos + 4 > payload.len() { return Err(io::Error::new(io::ErrorKind::InvalidData, "DeltaData truncated")); }
-                let data_len = u32::from_be_bytes(payload[pos..pos+4].try_into().unwrap()) as usize;
+                if pos + 4 > payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "DeltaData truncated",
+                    ));
+                }
+                let data_len =
+                    u32::from_be_bytes(payload[pos..pos + 4].try_into().unwrap()) as usize;
                 pos += 4;
-                if pos + data_len > payload.len() { return Err(io::Error::new(io::ErrorKind::InvalidData, "DeltaData truncated")); }
-                let data = payload[pos..pos+data_len].to_vec();
+                if pos + data_len > payload.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "DeltaData truncated",
+                    ));
+                }
+                let data = payload[pos..pos + data_len].to_vec();
                 pos += data_len;
                 instructions.push(DeltaInstructionPayload::Literal { data });
             }
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown delta instruction type")),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unknown delta instruction type",
+                ))
+            }
         }
     }
     Ok((path, source_size, delta_size, instructions))

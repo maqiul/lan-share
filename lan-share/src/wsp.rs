@@ -93,7 +93,12 @@ pub struct WspFrame {
 
 impl WspFrame {
     pub fn new(msg_type: u8, stream_id: u32, seq_num: u32, payload: Vec<u8>) -> Self {
-        Self { msg_type, stream_id, seq_num, payload }
+        Self {
+            msg_type,
+            stream_id,
+            seq_num,
+            payload,
+        }
     }
 
     /// JSON 控制帧
@@ -136,16 +141,24 @@ impl WspFrame {
             return Err(format!("payload 超限: {} > {}", payload_len, MAX_PAYLOAD));
         }
         if data.len() < WSP_HEADER_LEN + payload_len {
-            return Err(format!("payload 不完整: {} < {}", data.len(), WSP_HEADER_LEN + payload_len));
+            return Err(format!(
+                "payload 不完整: {} < {}",
+                data.len(),
+                WSP_HEADER_LEN + payload_len
+            ));
         }
         let payload = data[WSP_HEADER_LEN..WSP_HEADER_LEN + payload_len].to_vec();
-        Ok(Self { msg_type, stream_id, seq_num, payload })
+        Ok(Self {
+            msg_type,
+            stream_id,
+            seq_num,
+            payload,
+        })
     }
 
     /// 解析 JSON payload
     pub fn json_body<T: for<'de> Deserialize<'de>>(&self) -> Result<T, String> {
-        serde_json::from_slice(&self.payload)
-            .map_err(|e| format!("JSON 解析失败: {}", e))
+        serde_json::from_slice(&self.payload).map_err(|e| format!("JSON 解析失败: {}", e))
     }
 }
 
@@ -322,12 +335,16 @@ pub async fn wsp_upgrade(
     let count = WSP_CONN_COUNT.load(Ordering::Relaxed);
     if count >= MAX_CONNECTIONS {
         tracing::warn!("[WSP] 连接数已达上限 {}/{}", count, MAX_CONNECTIONS);
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "WSP 连接数已达上限").into_response();
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "WSP 连接数已达上限",
+        )
+            .into_response();
     }
 
     ws.max_message_size(MAX_PAYLOAD + WSP_HEADER_LEN) // 限制单条消息大小
-      .max_frame_size(MAX_PAYLOAD + WSP_HEADER_LEN)
-      .on_upgrade(move |socket| wsp_connection(socket, state))
+        .max_frame_size(MAX_PAYLOAD + WSP_HEADER_LEN)
+        .on_upgrade(move |socket| wsp_connection(socket, state))
 }
 
 async fn wsp_connection(socket: WebSocket, state: Arc<AppState>) {
@@ -358,10 +375,15 @@ async fn wsp_connection(socket: WebSocket, state: Arc<AppState>) {
     // 发送 Hello
     {
         let mut c = conn.lock().await;
-        let hello = WspFrame::json(MSG_HELLO, 0, c.next_seq(), &HelloMsg {
-            client_name: "LanShare-Server".into(),
-            version: WSP_VERSION,
-        });
+        let hello = WspFrame::json(
+            MSG_HELLO,
+            0,
+            c.next_seq(),
+            &HelloMsg {
+                client_name: "LanShare-Server".into(),
+                version: WSP_VERSION,
+            },
+        );
         let _ = frame_tx.send(hello.encode()).await;
     }
 
@@ -420,9 +442,14 @@ fn get_trash_dir(user_home: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// 移动文件到回收站
-async fn move_to_trash(user_home: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+async fn move_to_trash(
+    user_home: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<(), String> {
     let trash_dir = get_trash_dir(user_home);
-    tokio::fs::create_dir_all(&trash_dir).await.map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&trash_dir)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // 生成唯一文件名：原名_时间戳
     let file_name = target.file_name().unwrap_or_default().to_string_lossy();
@@ -441,7 +468,9 @@ async fn move_to_trash(user_home: &std::path::Path, target: &std::path::Path) ->
         .map_err(|e| e.to_string())?;
 
     // 移动文件
-    tokio::fs::rename(target, &trash_path).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(target, &trash_path)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -459,26 +488,37 @@ async fn restore_from_trash(user_home: &std::path::Path, trash_name: &str) -> Re
 
     // 确保父目录存在
     if let Some(parent) = original_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     // 移动回去
-    tokio::fs::rename(&trash_path, &original_path).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(&trash_path, &original_path)
+        .await
+        .map_err(|e| e.to_string())?;
     // 删除元数据
     let _ = tokio::fs::remove_file(&meta_path).await;
     Ok(())
 }
 
 /// 永久删除回收站中的文件
-async fn permanent_delete_from_trash(user_home: &std::path::Path, trash_name: &str) -> Result<(), String> {
+async fn permanent_delete_from_trash(
+    user_home: &std::path::Path,
+    trash_name: &str,
+) -> Result<(), String> {
     let trash_dir = get_trash_dir(user_home);
     let trash_path = trash_dir.join(trash_name);
     let meta_path = trash_dir.join(format!("{}.meta", trash_name));
 
     if trash_path.is_dir() {
-        tokio::fs::remove_dir_all(&trash_path).await.map_err(|e| e.to_string())?;
+        tokio::fs::remove_dir_all(&trash_path)
+            .await
+            .map_err(|e| e.to_string())?;
     } else {
-        tokio::fs::remove_file(&trash_path).await.map_err(|e| e.to_string())?;
+        tokio::fs::remove_file(&trash_path)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let _ = tokio::fs::remove_file(&meta_path).await;
     Ok(())
@@ -492,7 +532,9 @@ async fn empty_trash(user_home: &std::path::Path) -> Result<u64, String> {
     }
 
     let mut count = 0;
-    let mut entries = tokio::fs::read_dir(&trash_dir).await.map_err(|e| e.to_string())?;
+    let mut entries = tokio::fs::read_dir(&trash_dir)
+        .await
+        .map_err(|e| e.to_string())?;
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         // 跳过 .meta 文件
@@ -528,11 +570,16 @@ async fn handle_frame(
     match frame.msg_type {
         // 握手
         MSG_HELLO => {
-            let ack = WspFrame::json(MSG_HELLO_ACK, sid, seq, &HelloAckMsg {
-                server_name: "LanShare".into(),
-                version: WSP_VERSION,
-                ok: true,
-            });
+            let ack = WspFrame::json(
+                MSG_HELLO_ACK,
+                sid,
+                seq,
+                &HelloAckMsg {
+                    server_name: "LanShare".into(),
+                    version: WSP_VERSION,
+                    ok: true,
+                },
+            );
             let _ = frame_tx.send(ack.encode()).await;
         }
 
@@ -540,9 +587,14 @@ async fn handle_frame(
         MSG_AUTH => {
             let msg: AuthMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
-            let simple_mode = state.db.get_admin_setting("simple_mode")
+            let simple_mode = state
+                .db
+                .get_admin_setting("simple_mode")
                 .map(|v| v != "false")
                 .unwrap_or(true);
             // 简易模式和账号模式互斥
@@ -575,41 +627,89 @@ async fn handle_frame(
                 c.user_home = Some(home);
                 c.permissions = user.permissions.clone();
                 c.quota_mb = user.quota_mb;
-                let _ = frame_tx.send(WspFrame::json(MSG_AUTH_ACK, sid, c.next_seq(), &AuthAckMsg {
-                    ok: true, user: Some(user.username), error: None,
-                }).encode()).await;
+                let _ = frame_tx
+                    .send(
+                        WspFrame::json(
+                            MSG_AUTH_ACK,
+                            sid,
+                            c.next_seq(),
+                            &AuthAckMsg {
+                                ok: true,
+                                user: Some(user.username),
+                                error: None,
+                            },
+                        )
+                        .encode(),
+                    )
+                    .await;
             } else {
-                let _ = frame_tx.send(WspFrame::json(MSG_AUTH_ACK, sid, c.next_seq(), &AuthAckMsg {
-                    ok: false, user: None, error: Some("token 无效或已过期".into()),
-                }).encode()).await;
+                let _ = frame_tx
+                    .send(
+                        WspFrame::json(
+                            MSG_AUTH_ACK,
+                            sid,
+                            c.next_seq(),
+                            &AuthAckMsg {
+                                ok: false,
+                                user: None,
+                                error: Some("token 无效或已过期".into()),
+                            },
+                        )
+                        .encode(),
+                    )
+                    .await;
             }
         }
 
         // 以下需要认证
         _ if !authenticated => {
-            let _ = frame_tx.send(error_frame(sid, seq, 401, "未认证").encode()).await;
+            let _ = frame_tx
+                .send(error_frame(sid, seq, 401, "未认证").encode())
+                .await;
         }
 
         // 列目录
         MSG_LIST_DIR => {
             let msg: ListDirMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             let home = user_home.unwrap();
             let Some(dir) = safe_join(&home, &msg.path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
             // I/O 在锁外
             let result = list_dir_entries(&dir).await;
             let mut c = conn.lock().await;
             match result {
-                Ok(entries) => { let _ = frame_tx.send(WspFrame::json(MSG_LIST_DIR_RESP, sid, c.next_seq(), &ListDirRespMsg {
-                    path: msg.path, entries,
-                }).encode()).await; }
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, c.next_seq(), 500, &e).encode()).await; }
+                Ok(entries) => {
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_LIST_DIR_RESP,
+                                sid,
+                                c.next_seq(),
+                                &ListDirRespMsg {
+                                    path: msg.path,
+                                    entries,
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(error_frame(sid, c.next_seq(), 500, &e).encode())
+                        .await;
+                }
             }
         }
 
@@ -617,40 +717,71 @@ async fn handle_frame(
         MSG_STAT => {
             let msg: StatMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             let home = user_home.unwrap();
             let Some(target) = safe_join(&home, &msg.path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
             let result = tokio::fs::metadata(&target).await;
             let mut c = conn.lock().await;
             match result {
                 Ok(meta) => {
-                    let name = target.file_name()
+                    let name = target
+                        .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let mtime = meta.modified()
-                        .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+                    let mtime = meta
+                        .modified()
+                        .map(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                        })
                         .unwrap_or(0);
-                    let _ = frame_tx.send(WspFrame::json(MSG_STAT_RESP, sid, c.next_seq(), &StatRespMsg {
-                        name,
-                        is_dir: meta.is_dir(),
-                        size: meta.len(),
-                        mtime: mtime.to_string(),
-                        exists: true,
-                    }).encode()).await;
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_STAT_RESP,
+                                sid,
+                                c.next_seq(),
+                                &StatRespMsg {
+                                    name,
+                                    is_dir: meta.is_dir(),
+                                    size: meta.len(),
+                                    mtime: mtime.to_string(),
+                                    exists: true,
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
                 }
                 Err(_) => {
-                    let _ = frame_tx.send(WspFrame::json(MSG_STAT_RESP, sid, c.next_seq(), &StatRespMsg {
-                        name: String::new(),
-                        is_dir: false,
-                        size: 0,
-                        mtime: "0".to_string(),
-                        exists: false,
-                    }).encode()).await;
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_STAT_RESP,
+                                sid,
+                                c.next_seq(),
+                                &StatRespMsg {
+                                    name: String::new(),
+                                    is_dir: false,
+                                    size: 0,
+                                    mtime: "0".to_string(),
+                                    exists: false,
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
                 }
             }
         }
@@ -659,30 +790,50 @@ async fn handle_frame(
         MSG_MKDIR => {
             let msg: MkdirMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             // 权限检查
             {
                 let c = conn.lock().await;
                 if !c.can("mkdir") {
-                    let _ = frame_tx.send(error_frame(sid, c.seq, 403, "无创建目录权限").encode()).await;
+                    let _ = frame_tx
+                        .send(error_frame(sid, c.seq, 403, "无创建目录权限").encode())
+                        .await;
                     return;
                 }
             }
             let home = user_home.unwrap();
             let Some(dir) = safe_join(&home, &msg.path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
             let result = tokio::fs::create_dir_all(&dir).await;
             let mut c = conn.lock().await;
             match result {
                 Ok(()) => {
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "mkdir", Some(&msg.path), None, None);
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "mkdir",
+                        Some(&msg.path),
+                        None,
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), true, None).encode())
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode())
+                        .await;
+                }
             }
         }
 
@@ -690,35 +841,57 @@ async fn handle_frame(
         MSG_RENAME => {
             let msg: RenameMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             // 权限检查
             {
                 let c = conn.lock().await;
                 if !c.can("rename") {
-                    let _ = frame_tx.send(error_frame(sid, c.seq, 403, "无重命名权限").encode()).await;
+                    let _ = frame_tx
+                        .send(error_frame(sid, c.seq, 403, "无重命名权限").encode())
+                        .await;
                     return;
                 }
             }
             let home = user_home.unwrap();
             let Some(old) = safe_join(&home, &msg.old_path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
             let Some(new) = safe_join(&home, &msg.new_path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
             let result = tokio::fs::rename(&old, &new).await;
             let mut c = conn.lock().await;
             match result {
                 Ok(()) => {
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "rename", Some(&msg.old_path), Some(&format!("→ {}", msg.new_path)), None);
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "rename",
+                        Some(&msg.old_path),
+                        Some(&format!("→ {}", msg.new_path)),
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), true, None).encode())
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), false, Some(e.to_string())).encode())
+                        .await;
+                }
             }
         }
 
@@ -726,20 +899,27 @@ async fn handle_frame(
         MSG_DELETE => {
             let msg: DeleteMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             // 权限检查
             {
                 let c = conn.lock().await;
                 if !c.can("delete") {
-                    let _ = frame_tx.send(error_frame(sid, c.seq, 403, "无删除权限").encode()).await;
+                    let _ = frame_tx
+                        .send(error_frame(sid, c.seq, 403, "无删除权限").encode())
+                        .await;
                     return;
                 }
             }
             let home = user_home.unwrap();
             let Some(target) = safe_join(&home, &msg.path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
             // 移到回收站
@@ -747,10 +927,23 @@ async fn handle_frame(
             let mut c = conn.lock().await;
             match result {
                 Ok(()) => {
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "delete", Some(&msg.path), Some("移到回收站"), None);
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "delete",
+                        Some(&msg.path),
+                        Some("移到回收站"),
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), true, None).encode())
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), false, Some(e)).encode())
+                        .await;
+                }
             }
         }
 
@@ -758,24 +951,54 @@ async fn handle_frame(
         MSG_UPLOAD_START => {
             let msg: UploadStartMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             // 权限检查
             {
                 let c = conn.lock().await;
                 if !c.can("write") {
-                    let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.seq, &UploadAckMsg {
-                        ok: false, offset: 0, error: Some("无上传权限".into()),
-                    }).encode()).await;
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_UPLOAD_ACK,
+                                sid,
+                                c.seq,
+                                &UploadAckMsg {
+                                    ok: false,
+                                    offset: 0,
+                                    error: Some("无上传权限".into()),
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
                     return;
                 }
             }
             // 上传大小限制
             if msg.size > MAX_UPLOAD_SIZE {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                    ok: false, offset: 0, error: Some(format!("文件超过上限 {}GB", MAX_UPLOAD_SIZE / 1024 / 1024 / 1024)),
-                }).encode()).await;
+                let _ = frame_tx
+                    .send(
+                        WspFrame::json(
+                            MSG_UPLOAD_ACK,
+                            sid,
+                            c.next_seq(),
+                            &UploadAckMsg {
+                                ok: false,
+                                offset: 0,
+                                error: Some(format!(
+                                    "文件超过上限 {}GB",
+                                    MAX_UPLOAD_SIZE / 1024 / 1024 / 1024
+                                )),
+                            },
+                        )
+                        .encode(),
+                    )
+                    .await;
                 return;
             }
             // 配额检查
@@ -786,16 +1009,31 @@ async fn handle_frame(
                     let home = user_home.as_ref().unwrap();
                     let current_usage = dir_size(home).await;
                     // 如果是续传，减去已有文件大小
-                    let existing_size = tokio::fs::metadata(home.join(&msg.path)).await.map(|m| m.len()).unwrap_or(0);
+                    let existing_size = tokio::fs::metadata(home.join(&msg.path))
+                        .await
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     let net_add = msg.size.saturating_sub(existing_size);
                     if current_usage + net_add > quota_bytes {
-                        let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                            ok: false, offset: 0, error: Some(format!(
-                                "超出配额限制 ({} MB / {} MB)",
-                                current_usage / 1024 / 1024,
-                                c.quota_mb
-                            )),
-                        }).encode()).await;
+                        let _ = frame_tx
+                            .send(
+                                WspFrame::json(
+                                    MSG_UPLOAD_ACK,
+                                    sid,
+                                    c.next_seq(),
+                                    &UploadAckMsg {
+                                        ok: false,
+                                        offset: 0,
+                                        error: Some(format!(
+                                            "超出配额限制 ({} MB / {} MB)",
+                                            current_usage / 1024 / 1024,
+                                            c.quota_mb
+                                        )),
+                                    },
+                                )
+                                .encode(),
+                            )
+                            .await;
                         return;
                     }
                 }
@@ -803,9 +1041,21 @@ async fn handle_frame(
             let home = user_home.unwrap();
             let Some(path) = safe_join(&home, &msg.path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                    ok: false, offset: 0, error: Some("路径非法".into()),
-                }).encode()).await;
+                let _ = frame_tx
+                    .send(
+                        WspFrame::json(
+                            MSG_UPLOAD_ACK,
+                            sid,
+                            c.next_seq(),
+                            &UploadAckMsg {
+                                ok: false,
+                                offset: 0,
+                                error: Some("路径非法".into()),
+                            },
+                        )
+                        .encode(),
+                    )
+                    .await;
                 return;
             };
             if let Some(parent) = path.parent() {
@@ -813,7 +1063,10 @@ async fn handle_frame(
             }
 
             // 断点续传：检查已有文件大小
-            let existing_size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+            let existing_size = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
             let resume_offset = if existing_size > 0 && existing_size < msg.size {
                 existing_size // 部分上传，从已有大小处续传
             } else if existing_size == msg.size {
@@ -832,16 +1085,48 @@ async fn handle_frame(
             let mut c = conn.lock().await;
             match result {
                 Ok(file) => {
-                    c.uploads.insert(sid, UploadState {
-                        path, file, size: msg.size, received: resume_offset,
-                    });
-                    let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                        ok: true, offset: resume_offset, error: None,
-                    }).encode()).await;
+                    c.uploads.insert(
+                        sid,
+                        UploadState {
+                            path,
+                            file,
+                            size: msg.size,
+                            received: resume_offset,
+                        },
+                    );
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_UPLOAD_ACK,
+                                sid,
+                                c.next_seq(),
+                                &UploadAckMsg {
+                                    ok: true,
+                                    offset: resume_offset,
+                                    error: None,
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                    ok: false, offset: 0, error: Some(e.to_string()),
-                }).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_UPLOAD_ACK,
+                                sid,
+                                c.next_seq(),
+                                &UploadAckMsg {
+                                    ok: false,
+                                    offset: 0,
+                                    error: Some(e.to_string()),
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -850,7 +1135,9 @@ async fn handle_frame(
             use tokio::io::{AsyncSeekExt, AsyncWriteExt};
             if frame.payload.len() < 8 {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 400, "UploadData 太短").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 400, "UploadData 太短").encode())
+                    .await;
                 return;
             }
             let offset = u64::from_be_bytes(frame.payload[0..8].try_into().unwrap());
@@ -862,7 +1149,12 @@ async fn handle_frame(
                 if let Some(up) = c.uploads.get_mut(&sid) {
                     // 校验写入偏移不超过声明大小
                     if offset + data.len() as u64 > up.size {
-                        Err(format!("写入越界: offset={} + len={} > size={}", offset, data.len(), up.size))
+                        Err(format!(
+                            "写入越界: offset={} + len={} > size={}",
+                            offset,
+                            data.len(),
+                            up.size
+                        ))
                     } else {
                         let _ = up.file.seek(std::io::SeekFrom::Start(offset)).await;
                         match up.file.write_all(data).await {
@@ -880,12 +1172,40 @@ async fn handle_frame(
 
             let mut c = conn.lock().await;
             match result {
-                Ok(received) => { let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                    ok: true, offset: received, error: None,
-                }).encode()).await; }
-                Err(e) => { let _ = frame_tx.send(WspFrame::json(MSG_UPLOAD_ACK, sid, c.next_seq(), &UploadAckMsg {
-                    ok: false, offset, error: Some(e),
-                }).encode()).await; }
+                Ok(received) => {
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_UPLOAD_ACK,
+                                sid,
+                                c.next_seq(),
+                                &UploadAckMsg {
+                                    ok: true,
+                                    offset: received,
+                                    error: None,
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_UPLOAD_ACK,
+                                sid,
+                                c.next_seq(),
+                                &UploadAckMsg {
+                                    ok: false,
+                                    offset,
+                                    error: Some(e),
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
+                }
             }
         }
 
@@ -901,21 +1221,45 @@ async fn handle_frame(
                 drop(up.file);
                 // 校验接收字节数 == 声明大小
                 if up.received != up.size {
-                    tracing::warn!("[WSP] 上传大小不匹配: {:?} 声明={} 实际={}", up.path, up.size, up.received);
+                    tracing::warn!(
+                        "[WSP] 上传大小不匹配: {:?} 声明={} 实际={}",
+                        up.path,
+                        up.size,
+                        up.received
+                    );
                     let _ = tokio::fs::remove_file(&up.path).await;
                     let mut c = conn.lock().await;
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(format!(
-                        "大小不匹配: 声明 {} 实际 {}", up.size, up.received
-                    ))).encode()).await;
+                    let _ = frame_tx
+                        .send(
+                            op_ack(
+                                sid,
+                                c.next_seq(),
+                                false,
+                                Some(format!("大小不匹配: 声明 {} 实际 {}", up.size, up.received)),
+                            )
+                            .encode(),
+                        )
+                        .await;
                 } else {
                     tracing::info!("[WSP] 上传完成: {:?} ({} bytes)", up.path, up.received);
                     let mut c = conn.lock().await;
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "upload", Some(&up.path.to_string_lossy()), Some(&format!("{} bytes", up.received)), None);
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "upload",
+                        Some(&up.path.to_string_lossy()),
+                        Some(&format!("{} bytes", up.received)),
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), true, None).encode())
+                        .await;
                 }
             } else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 400, "未找到上传会话").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 400, "未找到上传会话").encode())
+                    .await;
             }
         }
 
@@ -923,12 +1267,17 @@ async fn handle_frame(
         MSG_DOWNLOAD_REQ => {
             let msg: DownloadReqMsg = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             let home = user_home.unwrap();
             let Some(path) = safe_join(&home, &msg.path) else {
                 let mut c = conn.lock().await;
-                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 403, "路径非法").encode()).await;
+                let _ = frame_tx
+                    .send(error_frame(sid, c.next_seq(), 403, "路径非法").encode())
+                    .await;
                 return;
             };
 
@@ -955,7 +1304,12 @@ async fn handle_frame(
                             Ok(n) => n,
                             Err(e) => {
                                 let mut c = conn.lock().await;
-                                let _ = frame_tx.send(error_frame(sid, c.next_seq(), 500, &e.to_string()).encode()).await;
+                                let _ = frame_tx
+                                    .send(
+                                        error_frame(sid, c.next_seq(), 500, &e.to_string())
+                                            .encode(),
+                                    )
+                                    .await;
                                 return;
                             }
                         };
@@ -974,14 +1328,34 @@ async fn handle_frame(
                     let mut c = conn.lock().await;
                     // 同步 seq 计数器
                     c.seq = local_seq;
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "download", Some(&msg.path), Some(&format!("{} bytes", total)), None);
-                    let _ = frame_tx.send(WspFrame::json(MSG_DOWNLOAD_END, sid, c.next_seq(), &DownloadEndMsg {
-                        path: msg.path, size: total,
-                    }).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "download",
+                        Some(&msg.path),
+                        Some(&format!("{} bytes", total)),
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(
+                            WspFrame::json(
+                                MSG_DOWNLOAD_END,
+                                sid,
+                                c.next_seq(),
+                                &DownloadEndMsg {
+                                    path: msg.path,
+                                    size: total,
+                                },
+                            )
+                            .encode(),
+                        )
+                        .await;
                 }
                 Err(e) => {
                     let mut c = conn.lock().await;
-                    let _ = frame_tx.send(error_frame(sid, c.next_seq(), 404, &e.to_string()).encode()).await;
+                    let _ = frame_tx
+                        .send(error_frame(sid, c.next_seq(), 404, &e.to_string()).encode())
+                        .await;
                 }
             }
         }
@@ -996,9 +1370,13 @@ async fn handle_frame(
                     while let Ok(Some(entry)) = rd.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
                         // 跳过 .meta 文件
-                        if name.ends_with(".meta") { continue; }
+                        if name.ends_with(".meta") {
+                            continue;
+                        }
                         let meta_path = trash_dir.join(format!("{}.meta", name));
-                        let original_path = tokio::fs::read_to_string(&meta_path).await.unwrap_or_default();
+                        let original_path = tokio::fs::read_to_string(&meta_path)
+                            .await
+                            .unwrap_or_default();
                         let is_dir = entry.path().is_dir();
                         let size = if is_dir {
                             dir_size(&entry.path()).await
@@ -1016,14 +1394,19 @@ async fn handle_frame(
             }
             let mut c = conn.lock().await;
             let resp = serde_json::json!({ "entries": entries });
-            let _ = frame_tx.send(WspFrame::json(MSG_TRASH_LIST_RESP, sid, c.next_seq(), &resp).encode()).await;
+            let _ = frame_tx
+                .send(WspFrame::json(MSG_TRASH_LIST_RESP, sid, c.next_seq(), &resp).encode())
+                .await;
         }
 
         // 回收站：恢复
         MSG_TRASH_RESTORE => {
             let msg: serde_json::Value = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             let trash_name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let home = user_home.unwrap();
@@ -1031,10 +1414,23 @@ async fn handle_frame(
             let mut c = conn.lock().await;
             match result {
                 Ok(()) => {
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "trash_restore", Some(trash_name), None, None);
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "trash_restore",
+                        Some(trash_name),
+                        None,
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), true, None).encode())
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), false, Some(e)).encode())
+                        .await;
+                }
             }
         }
 
@@ -1042,7 +1438,10 @@ async fn handle_frame(
         MSG_TRASH_DELETE => {
             let msg: serde_json::Value = match frame.json_body() {
                 Ok(m) => m,
-                Err(e) => { let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await; return; }
+                Err(e) => {
+                    let _ = frame_tx.send(error_frame(sid, seq, 400, &e).encode()).await;
+                    return;
+                }
             };
             let trash_name = msg.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let home = user_home.unwrap();
@@ -1050,10 +1449,23 @@ async fn handle_frame(
             let mut c = conn.lock().await;
             match result {
                 Ok(()) => {
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "trash_delete", Some(trash_name), Some("永久删除"), None);
-                    let _ = frame_tx.send(op_ack(sid, c.next_seq(), true, None).encode()).await;
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "trash_delete",
+                        Some(trash_name),
+                        Some("永久删除"),
+                        None,
+                    );
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), true, None).encode())
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), false, Some(e)).encode())
+                        .await;
+                }
             }
         }
 
@@ -1064,23 +1476,48 @@ async fn handle_frame(
             let mut c = conn.lock().await;
             match result {
                 Ok(count) => {
-                    state.db.audit_log(None, c.username.as_deref().unwrap_or("?"), "trash_empty", None, Some(&format!("删除 {} 项", count)), None);
+                    state.db.audit_log(
+                        None,
+                        c.username.as_deref().unwrap_or("?"),
+                        "trash_empty",
+                        None,
+                        Some(&format!("删除 {} 项", count)),
+                        None,
+                    );
                     let resp = serde_json::json!({ "ok": true, "deleted": count });
-                    let _ = frame_tx.send(WspFrame::json(MSG_OP_ACK, sid, c.next_seq(), &resp).encode()).await;
+                    let _ = frame_tx
+                        .send(WspFrame::json(MSG_OP_ACK, sid, c.next_seq(), &resp).encode())
+                        .await;
                 }
-                Err(e) => { let _ = frame_tx.send(op_ack(sid, c.next_seq(), false, Some(e)).encode()).await; }
+                Err(e) => {
+                    let _ = frame_tx
+                        .send(op_ack(sid, c.next_seq(), false, Some(e)).encode())
+                        .await;
+                }
             }
         }
 
         // 心跳
         MSG_KEEPALIVE => {
             let mut c = conn.lock().await;
-            let _ = frame_tx.send(WspFrame::new(MSG_KEEPALIVE, sid, c.next_seq(), vec![]).encode()).await;
+            let _ = frame_tx
+                .send(WspFrame::new(MSG_KEEPALIVE, sid, c.next_seq(), vec![]).encode())
+                .await;
         }
 
         _ => {
             let mut c = conn.lock().await;
-            let _ = frame_tx.send(error_frame(sid, c.next_seq(), 400, &format!("未知消息类型: 0x{:02X}", frame.msg_type)).encode()).await;
+            let _ = frame_tx
+                .send(
+                    error_frame(
+                        sid,
+                        c.next_seq(),
+                        400,
+                        &format!("未知消息类型: 0x{:02X}", frame.msg_type),
+                    )
+                    .encode(),
+                )
+                .await;
         }
     }
 }
@@ -1088,10 +1525,15 @@ async fn handle_frame(
 // 辅助函数
 
 fn error_frame(sid: u32, seq: u32, code: u32, msg: &str) -> WspFrame {
-    WspFrame::json(MSG_ERROR, sid, seq, &ErrorMsg {
-        code,
-        message: msg.to_string(),
-    })
+    WspFrame::json(
+        MSG_ERROR,
+        sid,
+        seq,
+        &ErrorMsg {
+            code,
+            message: msg.to_string(),
+        },
+    )
 }
 
 fn op_ack(sid: u32, seq: u32, ok: bool, error: Option<String>) -> WspFrame {
@@ -1104,7 +1546,11 @@ fn resolve_user_dir(state: &AppState, user: &crate::db::User) -> PathBuf {
         state.shared_dir.clone()
     } else if let Some(dir) = &user.shared_dir {
         let p = PathBuf::from(dir);
-        if p.is_absolute() { p } else { state.shared_dir.join(p) }
+        if p.is_absolute() {
+            p
+        } else {
+            state.shared_dir.join(p)
+        }
     } else {
         state.shared_dir.clone()
     };
@@ -1128,7 +1574,9 @@ fn safe_join(home: &Path, rel: &str) -> Option<PathBuf> {
     // 文件已存在：canonicalize 后验证前缀
     if let Ok(p) = joined.canonicalize() {
         if let Ok(h) = home.canonicalize() {
-            if p.starts_with(&h) { return Some(p); }
+            if p.starts_with(&h) {
+                return Some(p);
+            }
         }
         return None;
     }
@@ -1136,7 +1584,9 @@ fn safe_join(home: &Path, rel: &str) -> Option<PathBuf> {
     if let Some(parent) = joined.parent() {
         if let Ok(cp) = parent.canonicalize() {
             if let Ok(h) = home.canonicalize() {
-                if cp.starts_with(&h) { return Some(joined); }
+                if cp.starts_with(&h) {
+                    return Some(joined);
+                }
             }
         }
     }
@@ -1149,15 +1599,21 @@ fn safe_join(home: &Path, rel: &str) -> Option<PathBuf> {
 
 async fn list_dir_entries(dir: &Path) -> Result<Vec<DirEntryMsg>, String> {
     let mut entries = Vec::new();
-    let mut rd = tokio::fs::read_dir(dir).await
+    let mut rd = tokio::fs::read_dir(dir)
+        .await
         .map_err(|e| format!("无法读取目录: {}", e))?;
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().to_string();
         // 隐藏系统目录
-        if name == ".trash" { continue; }
+        if name == ".trash" {
+            continue;
+        }
         let meta = entry.metadata().await.map_err(|e| e.to_string())?;
-        let mtime = chrono::DateTime::<chrono::Local>::from(meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH))
-            .format("%Y-%m-%d %H:%M:%S").to_string();
+        let mtime = chrono::DateTime::<chrono::Local>::from(
+            meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        )
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
         entries.push(DirEntryMsg {
             name,
             is_dir: meta.is_dir(),
@@ -1166,7 +1622,9 @@ async fn list_dir_entries(dir: &Path) -> Result<Vec<DirEntryMsg>, String> {
         });
     }
     entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     Ok(entries)
 }

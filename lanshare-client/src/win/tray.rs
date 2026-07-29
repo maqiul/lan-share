@@ -17,8 +17,8 @@ use lanshare_client::LspShareClient;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD,
-    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, NIIF_INFO, NIIF_WARNING,
+    ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO,
+    NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -55,7 +55,10 @@ static TRAY_HWND: OnceLock<SafeHwnd> = OnceLock::new();
 
 /// 将 &str 转为以 NUL 结尾的宽字符串
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// 当前连接状态文本（依据客户端健康标志）
@@ -157,12 +160,12 @@ pub fn run_tray(
 /// 加载内嵌于模块资源的应用图标（build.rs 经 winres 以序号 1 内嵌）；
 /// 加载失败时回退到系统默认图标。
 unsafe fn load_app_icon() -> HICON {
-    let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null())
-        .unwrap_or_default();
+    let hinstance =
+        windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
     // MAKEINTRESOURCEW(1)：低 16 位直接作为资源序号
     match LoadImageW(
         Some(hinstance.into()),
-        PCWSTR(1 as *mut u16),
+        PCWSTR(std::ptr::dangling_mut::<u16>()),
         IMAGE_ICON,
         0,
         0,
@@ -239,15 +242,35 @@ unsafe fn show_context_menu(hwnd: HWND) {
         to_wide("卸载并退出")
     };
 
-    let _ = AppendMenuW(menu, MF_STRING, IDM_OPEN_DRIVE as usize, PCWSTR(open_text.as_ptr()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        IDM_OPEN_DRIVE as usize,
+        PCWSTR(open_text.as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     // 连接状态（灰显，仅作信息展示）
     let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(status_item.as_ptr()));
-    let _ = AppendMenuW(menu, MF_STRING, IDM_RECONNECT as usize, PCWSTR(reconnect_text.as_ptr()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        IDM_RECONNECT as usize,
+        PCWSTR(reconnect_text.as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, IDM_AUTOSTART as usize, PCWSTR(autostart_text.as_ptr()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        IDM_AUTOSTART as usize,
+        PCWSTR(autostart_text.as_ptr()),
+    );
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, IDM_EXIT as usize, PCWSTR(exit_text.as_ptr()));
+    let _ = AppendMenuW(
+        menu,
+        MF_STRING,
+        IDM_EXIT as usize,
+        PCWSTR(exit_text.as_ptr()),
+    );
 
     let mut pt: POINT = std::mem::zeroed();
     let _ = GetCursorPos(&mut pt);
@@ -285,12 +308,7 @@ pub fn show_balloon(title: &str, msg: &str, warning: bool) {
 }
 
 /// 托盘隐藏窗口的窗口过程
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_TRAYICON => {
             let event = (lparam.0 & 0xFFFF) as u32;
@@ -338,7 +356,10 @@ unsafe extern "system" fn wndproc(
                 IDM_AUTOSTART => {
                     let current = crate::win::is_autostart_enabled();
                     crate::win::set_autostart(!current);
-                    crate::discovery::log(&format!("开机自启动: {}", if !current { "已开启" } else { "已关闭" }));
+                    crate::discovery::log(&format!(
+                        "开机自启动: {}",
+                        if !current { "已开启" } else { "已关闭" }
+                    ));
                     return LRESULT(0);
                 }
                 IDM_EXIT => {
@@ -350,10 +371,11 @@ unsafe extern "system" fn wndproc(
                         let pw = PENDING_WRITES.get().cloned();
                         std::thread::spawn(move || {
                             // 等待写回完成（最多 10 秒）
-                            let deadline = std::time::Instant::now()
-                                + std::time::Duration::from_secs(10);
+                            let deadline =
+                                std::time::Instant::now() + std::time::Duration::from_secs(10);
                             while std::time::Instant::now() < deadline {
-                                let done = pw.as_ref()
+                                let done = pw
+                                    .as_ref()
                                     .map(|p| p.load(Ordering::Acquire) == 0)
                                     .unwrap_or(true);
                                 if done {
@@ -362,7 +384,9 @@ unsafe extern "system" fn wndproc(
                                 std::thread::sleep(std::time::Duration::from_millis(200));
                             }
                             crate::discovery::log("同步完成或超时，执行退出");
-                            unsafe { PostQuitMessage(0); }
+                            unsafe {
+                                PostQuitMessage(0);
+                            }
                         });
                     } else {
                         remove_tray_icon(hwnd);
