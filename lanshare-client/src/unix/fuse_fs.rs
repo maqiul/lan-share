@@ -357,7 +357,7 @@ impl Filesystem for LanShareFuse {
                             holds_lock: false,
                         },
                     );
-                    return reply.opened(fh, 0);
+                    reply.opened(fh, 0);
                 }
                 Ok(stat) if stat.exists => {
                     // 下载现有内容到写缓冲
