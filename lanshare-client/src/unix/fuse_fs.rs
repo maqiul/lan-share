@@ -111,6 +111,7 @@ impl LanShareFuse {
         }
     }
 
+    #[allow(dead_code)]
     pub fn pending_writes_handle(&self) -> Arc<AtomicUsize> {
         self.pending_writes.clone()
     }
@@ -151,7 +152,7 @@ impl LanShareFuse {
         FileAttr {
             ino,
             size,
-            blocks: (size + 511) / 512,
+            blocks: size.div_ceil(512),
             atime: time,
             mtime: time,
             ctime: time,
@@ -246,16 +247,15 @@ impl Filesystem for LanShareFuse {
                     reply.attr(&ATTR_TTL, &attr);
                 }
             }
-            return;
-        }
-
-        match self.client.stat(&path) {
-            Ok(stat) if stat.exists => {
-                let attr = self.make_attr(ino, stat.is_dir, stat.size, &stat.mtime);
-                reply.attr(&ATTR_TTL, &attr);
+        } else {
+            match self.client.stat(&path) {
+                Ok(stat) if stat.exists => {
+                    let attr = self.make_attr(ino, stat.is_dir, stat.size, &stat.mtime);
+                    reply.attr(&ATTR_TTL, &attr);
+                }
+                Ok(_) => reply.error(libc::ENOENT),
+                Err(_) => reply.error(libc::EIO),
             }
-            Ok(_) => reply.error(libc::ENOENT),
-            Err(_) => reply.error(libc::EIO),
         }
     }
 

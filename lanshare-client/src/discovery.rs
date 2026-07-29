@@ -377,6 +377,7 @@ pub fn default_mount() -> String {
 //  敏感信息保护（Windows: DPAPI；Unix: 明文 600 权限文件）
 // ══════════════════════════════════════════════════════════
 
+#[cfg(windows)]
 const ENC_PREFIX: &str = "enc:";
 
 #[cfg(windows)]

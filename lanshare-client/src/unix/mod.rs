@@ -215,7 +215,7 @@ fn daemonize() {
             std::process::exit(0);
         }
         // 重定向标准流到 /dev/null
-        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR);
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
         if devnull >= 0 {
             libc::dup2(devnull, 0);
             libc::dup2(devnull, 1);
