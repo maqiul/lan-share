@@ -5,13 +5,14 @@ use crate::db::User;
 use crate::server::AppState;
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -189,13 +190,22 @@ pub async fn get_mode(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// POST /api/login
-pub async fn login(State(state): State<Arc<AppState>>, Json(req): Json<LoginReq>) -> Response {
+pub async fn login(State(state): State<Arc<AppState>>, ConnectInfo(addr): ConnectInfo<SocketAddr>, Json(req): Json<LoginReq>) -> Response {
+    let client_ip = addr.ip().to_string();
+
     // 简易模式下只允许管理员登录（用于进入设置界面）
     let simple_mode = state.db.get_admin_setting("simple_mode")
         .map(|v| v != "false")
         .unwrap_or(true);
 
-    // 暴力破解防护：检查是否被锁定（数据库持久化）
+    // IP 级限流：同一 IP 15分钟内失败 20 次则锁定
+    let (ip_locked, ip_remain) = state.db.is_ip_locked(&client_ip);
+    if ip_locked {
+        return json_resp(StatusCode::TOO_MANY_REQUESTS,
+            &format!(r#"{{"error":"请求过于频繁，请 {} 秒后重试"}}"#, ip_remain));
+    }
+
+    // 账号级限流：同一账号 15分钟内失败 5 次则锁定
     let (locked, remain_secs) = state.db.is_account_locked(&req.username);
     if locked {
         return json_resp(StatusCode::TOO_MANY_REQUESTS,
@@ -209,7 +219,7 @@ pub async fn login(State(state): State<Arc<AppState>>, Json(req): Json<LoginReq>
                 return json_resp(StatusCode::FORBIDDEN, r#"{"error":"简易模式下请使用 PIN 码连接"}"#);
             }
             state.db.clear_failed_attempts(&req.username);
-            state.db.record_login_attempt(&req.username, None, true);
+            state.db.record_login_attempt(&req.username, Some(&client_ip), true);
             let token = match state.db.create_session(user.id) {
                 Ok(t) => t,
                 Err(e) => return json_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!(r#"{{"error":"{e}"}}"#)),
@@ -224,7 +234,7 @@ pub async fn login(State(state): State<Arc<AppState>>, Json(req): Json<LoginReq>
             ok_json(&resp)
         }
         None => {
-            state.db.record_login_attempt(&req.username, None, false);
+            state.db.record_login_attempt(&req.username, Some(&client_ip), false);
             // 审计日志：登录失败
             state.db.audit_log(None, &req.username, "login_failed", None, Some("用户名或密码错误"), None);
             unauthorized_json("用户名或密码错误")

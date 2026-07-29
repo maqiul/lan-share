@@ -327,6 +327,42 @@ impl Database {
         );
     }
 
+    /// IP 级限流：同一 IP 15分钟内失败 20 次则锁定
+    pub fn is_ip_locked(&self, ip: &str) -> (bool, i64) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let fail_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM login_attempts
+                 WHERE ip_addr = ?1 AND success = 0
+                 AND attempted_at > datetime('now', '-15 minutes')",
+                params![ip],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        if fail_count >= 20 {
+            let last_fail: String = conn
+                .query_row(
+                    "SELECT attempted_at FROM login_attempts
+                     WHERE ip_addr = ?1 AND success = 0
+                     ORDER BY attempted_at DESC LIMIT 1",
+                    params![ip],
+                    |r| r.get(0),
+                )
+                .unwrap_or_default();
+            let remain: i64 = conn
+                .query_row(
+                    "SELECT CAST((julianday(datetime('now', '+15 minutes')) - julianday(?1)) * 86400 AS INTEGER)",
+                    params![last_fail],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            (true, remain.max(0))
+        } else {
+            (false, 0)
+        }
+    }
+
     // 用户管理（admin）
 
     fn get_user_by_id_inner(&self, conn: &Connection, user_id: i64) -> Option<User> {

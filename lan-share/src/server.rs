@@ -7,6 +7,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
@@ -101,7 +102,7 @@ pub async fn start_web_server(
     info!("Web server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

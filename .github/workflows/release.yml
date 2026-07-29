@@ -137,7 +137,7 @@ jobs:
             lanshare-client-*.tar.gz
           retention-days: 7
 
-  # ═══════════════ macOS ═══════════════
+  # ═══════════════ macOS (Apple Silicon) ═══════════════
   build-macos:
     runs-on: macos-latest
     steps:
@@ -173,8 +173,8 @@ jobs:
           mkdir -p pkg/lanshare-server pkg/lanshare-client
           cp target/release/lan-share pkg/lanshare-server/lanshare-server
           cp target/release/lanshare-client pkg/lanshare-client/lanshare-client
-          tar -czf "lanshare-server-${TAG}-macos-x64.tar.gz" -C pkg lanshare-server
-          tar -czf "lanshare-client-${TAG}-macos-x64.tar.gz" -C pkg lanshare-client
+          tar -czf "lanshare-server-${TAG}-macos-arm64.tar.gz" -C pkg lanshare-server
+          tar -czf "lanshare-client-${TAG}-macos-arm64.tar.gz" -C pkg lanshare-client
           ls -la *.tar.gz
 
       - name: Create GitHub Release
@@ -189,7 +189,84 @@ jobs:
         if: "!startsWith(github.ref, 'refs/tags/')"
         uses: actions/upload-artifact@v4
         with:
-          name: lanshare-build-macos
+          name: lanshare-build-macos-arm64
+          path: |
+            lanshare-server-*.tar.gz
+            lanshare-client-*.tar.gz
+          retention-days: 7
+
+  # ═══════════════ Linux ARM64 ═══════════════
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libfuse3-dev:arm64 libdbus-1-dev:arm64 pkg-config
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev:arm64 libdbus-1-dev:arm64
+
+      - name: Configure linker
+        run: |
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-arm64-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-cargo-
+
+      - name: Build release binaries
+        run: |
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+          cargo build --release --target aarch64-unknown-linux-gnu -p lan-share -p lanshare-client
+
+      - name: Package artifacts
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          [ "$GITHUB_REF" = "$TAG" ] && TAG="nightly"
+          echo "Packaging version: $TAG"
+
+          mkdir -p pkg/lanshare-server pkg/lanshare-client
+          cp target/aarch64-unknown-linux-gnu/release/lan-share pkg/lanshare-server/lanshare-server
+          cp target/aarch64-unknown-linux-gnu/release/lanshare-client pkg/lanshare-client/lanshare-client
+          tar -czf "lanshare-server-${TAG}-linux-arm64.tar.gz" -C pkg lanshare-server
+          tar -czf "lanshare-client-${TAG}-linux-arm64.tar.gz" -C pkg lanshare-client
+          ls -la *.tar.gz
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            lanshare-server-*.tar.gz
+            lanshare-client-*.tar.gz
+
+      - name: Upload artifacts (non-tag builds)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanshare-build-linux-arm64
           path: |
             lanshare-server-*.tar.gz
             lanshare-client-*.tar.gz
