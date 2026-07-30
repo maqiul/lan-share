@@ -210,6 +210,13 @@ jobs:
       - name: Install cross-compilation tools
         run: |
           sudo dpkg --add-architecture arm64
+          # 限制默认源只服务 amd64，避免从 security.ubuntu.com 拉 arm64 索引 404
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          sudo find /etc/apt/sources.list.d -name '*.sources' -exec sed -i '/^URIs:/a Architectures: amd64' {} \;
+          # arm64 包来自 ports.ubuntu.com
+          echo 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse' | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse' | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          echo 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse' | sudo tee -a /etc/apt/sources.list.d/arm64.list
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             pkg-config libfuse3-dev:arm64 libdbus-1-dev:arm64
