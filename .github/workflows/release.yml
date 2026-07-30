@@ -209,12 +209,10 @@ jobs:
 
       - name: Install cross-compilation tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            libfuse3-dev:arm64 libdbus-1-dev:arm64 pkg-config
           sudo dpkg --add-architecture arm64
           sudo apt-get update
-          sudo apt-get install -y libfuse3-dev:arm64 libdbus-1-dev:arm64
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            pkg-config libfuse3-dev:arm64 libdbus-1-dev:arm64
 
       - name: Configure linker
         run: |
