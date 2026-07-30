@@ -379,6 +379,8 @@ async fn run_server(
     auto_browser: bool,
     with_tray: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "tray"))]
+    let _ = with_tray;
     let device_name = name.unwrap_or_else(|| {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
@@ -520,6 +522,7 @@ async fn run_server(
         }
 
         // 系统托盘常驻（_tray 持有到函数结束避免图标销毁）
+        #[cfg(feature = "tray")]
         let _tray = if with_tray {
             let url = format!("http://127.0.0.1:{}", web_port);
             match setup_tray(&url) {
@@ -608,6 +611,7 @@ fn open_browser(url: &str) {
 }
 
 /// 创建系统托盘图标（含「打开界面」「退出」菜单，跨平台）
+#[cfg(feature = "tray")]
 fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Error>> {
     use tray_item::{IconSource, TrayItem};
 
@@ -669,6 +673,7 @@ fn setup_tray(url: &str) -> Result<tray_item::TrayItem, Box<dyn std::error::Erro
 // ─── 图标生成（跨平台） ───
 
 /// 生成 16×16 RGBA 像素矩阵：蓝色圆角背景 + 白色向上箭头
+#[cfg(feature = "tray")]
 fn generate_icon_pixels() -> Vec<[u8; 4]> {
     const W: usize = 16;
     let blue: [u8; 4] = [0x2B, 0x7D, 0xE9, 0xFF]; // RGBA
@@ -696,6 +701,7 @@ fn generate_icon_pixels() -> Vec<[u8; 4]> {
 }
 
 /// 判断像素 (x,y) 是否属于白色向上箭头（16×16 逻辑坐标，y=0 为顶部）
+#[cfg(feature = "tray")]
 fn is_arrow_pixel(x: usize, y: usize) -> bool {
     if (3..=7).contains(&y) {
         let spread = y - 2;
@@ -708,7 +714,7 @@ fn is_arrow_pixel(x: usize, y: usize) -> bool {
 }
 
 /// Windows: 生成 16×16 32位 ICO 字节流（BGRA 序）
-#[cfg(windows)]
+#[cfg(all(windows, feature = "tray"))]
 fn generate_icon_ico() -> Vec<u8> {
     const W: usize = 16;
     let pixels = generate_icon_pixels();
@@ -740,7 +746,7 @@ fn generate_icon_ico() -> Vec<u8> {
 }
 
 /// macOS: 生成 PNG 编码数据（NSImage::initWithData 用）
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "tray"))]
 fn generate_icon_png() -> Vec<u8> {
     let pixels = generate_icon_pixels();
     let rgba: Vec<u8> = pixels.iter().flat_map(|p| *p).collect();
@@ -757,7 +763,7 @@ fn generate_icon_png() -> Vec<u8> {
 }
 
 /// Linux: 生成 ARGB32 大端原始像素（D-Bus StatusNotifier IconPixmap 用）
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), feature = "tray"))]
 fn generate_icon_argb32() -> Vec<u8> {
     let pixels = generate_icon_pixels();
     let mut data = Vec::with_capacity(16 * 16 * 4);

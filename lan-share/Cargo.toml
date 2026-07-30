@@ -4,6 +4,10 @@ version = "0.4.0"
 edition = "2021"
 description = "LanShare - 基于 LSP3 协议的局域网文件共享（加密/重传/流控/拥塞控制/差异传输/压缩）"
 
+[features]
+default = ["tray"]
+tray = ["dep:tray-item", "dep:png"]
+
 [dependencies]
 lsp-protocol = { path = "../lsp-protocol" }
 tokio = { version = "1", features = ["full"] }
@@ -31,12 +35,12 @@ walkdir = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging"] }
-tray-item = "0.10"
+tray-item = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tray-item = { version = "0.10", features = ["ksni"] }
-png = "0.17"
+tray-item = { version = "0.10", features = ["ksni"], optional = true }
+png = { version = "0.17", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tray-item = "0.10"
-png = "0.17"
+tray-item = { version = "0.10", optional = true }
+png = { version = "0.17", optional = true }
