@@ -219,15 +219,12 @@ jobs:
           echo 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse' | sudo tee -a /etc/apt/sources.list.d/arm64.list
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            pkg-config libfuse3-dev:arm64 libdbus-1-dev:arm64
+            pkg-config libfuse3-dev libdbus-1-dev libfuse3-dev:arm64 libdbus-1-dev:arm64
 
       - name: Configure linker
         run: |
           mkdir -p .cargo
-          cat >> .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' > .cargo/config.toml
 
       - name: Cargo cache
         uses: actions/cache@v4
@@ -241,9 +238,11 @@ jobs:
             ${{ runner.os }}-arm64-cargo-
 
       - name: Build release binaries
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
         run: |
-          export PKG_CONFIG_ALLOW_CROSS=1
-          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
           cargo build --release --target aarch64-unknown-linux-gnu -p lan-share -p lanshare-client
 
       - name: Package artifacts
